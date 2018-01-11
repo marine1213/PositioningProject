@@ -1,0 +1,91 @@
+		//find Hough lines
+//			vector<Vec4i> lines;
+//
+//			Mat houghLines;
+//			cntTempMat.copyTo(houghLines);
+//			cvtColor(houghLines, houghLines, CV_GRAY2BGR);
+//
+//			// Hough method
+//			HoughLinesP(cntTempMat, lines, 1, CV_PI / 180, 30, 30, 10);
+//			for (size_t i = 0; i < lines.size(); i++) {
+//				Vec4i l = lines[i];
+//				line(houghLines, Point(l[0], l[1]), Point(l[2], l[3]),Scalar(255, 255, 0), 3, CV_AA);
+//			}
+//			imshow("hough", houghLines);
+//			waitKey(0);
+
+
+
+//			cameraPt.push_back(Point2f(r.x+r.width/2,r.y+r.height/2));
+//			cameraPt.push_back(Point2f(r.x,r.y));
+//			cameraPt.push_back(Point2f(r.x+r.width,r.y));
+//			cameraPt.push_back(Point2f(r.x,r.y+r.height));
+//			cameraPt.push_back(Point2f(r.x+r.width,r.y+r.height));
+
+
+//		Mat cannyImg;
+//		Canny(grayInput.clone(),cannyImg, 20,250 );
+//		imshow("canny thres",cannyImg);
+//		threshold(cannyImg, cannyImg,2,255,CV_THRESH_BINARY);
+//		Mat shadowRemovedImg;
+//		bitwise_and(orgMov,cannyImg, shadowRemovedImg);
+//		imshow("shadow removed Img", shadowRemovedImg);
+
+//		vector<vector<Point> > cntsInMov;
+//		vector<Vec4i> cntHeirMov;
+//
+//		Mat cntInMovMat = Mat::zeros(input.rows, input.cols, CV_32SC1);
+//
+//		findContours(cannyImg, cntsInMov, cntHeirMov, CV_RETR_LIST, CV_CHAIN_APPROX_NONE);
+//		for (size_t i = 0; i < cntsInMov.size(); ++i) {
+//			drawContours(cntInMovMat, cntsInMov, static_cast<int>(i), Scalar(static_cast<int>(i+1)), 2, 8, cntHeirMov);
+//		}
+//		circle(cntInMovMat, Point(5, 5), 3, CV_RGB(255, 255, 255), -1);
+//
+//		Mat img8UC3;
+//		cvtColor(orgMov, img8UC3, CV_GRAY2BGR);
+//		watershed(img8UC3, cntInMovMat);
+//		Mat mark2 = Mat::zeros(cntInMovMat.size(), CV_8UC1);
+//		cntInMovMat.convertTo(mark2, CV_8UC1);
+//		bitwise_not(mark2, mark2);
+//
+//		imshow("mark2", mark2);
+//
+//		// Generate random colors
+//		vector<Vec3b> colors;
+//		for (size_t i = 0; i < cntsInMov.size(); i++) {
+//			int b = theRNG().uniform(0, 255);
+//			int g = theRNG().uniform(0, 255);
+//			int r = theRNG().uniform(0, 255);
+//			colors.push_back(Vec3b((uchar) b, (uchar) g, (uchar) r));
+//		}
+//		// Create the result image
+//		Mat dst = Mat::zeros(cntInMovMat.size(), CV_8UC3);
+//		// Fill labeled objects with random colors
+//		for (int i = 0; i < cntInMovMat.rows; i++) {
+//			for (int j = 0; j < cntInMovMat.cols; j++) {
+//				int index = cntInMovMat.at<int>(i, j);
+//				if (index > 0 && index <= static_cast<int>(cntsInMov.size()))
+//					dst.at<Vec3b>(i, j) = colors[index - 1];
+//				else
+//					dst.at<Vec3b>(i, j) = Vec3b(0, 0, 0);
+//			}
+//		}
+//		// Visualize the final image
+//		imshow("Final Result in Cnt", dst);
+
+
+//				Mat orgMovSep = Mat::zeros(input.size(), CV_8UC1);
+//				bitwise_and(grayInput,markerExtract, orgMovSep);
+////				bitwise_or(orgMovSep,orgMovSepTotal,orgMovSepTotal);
+//				imshow("markers Extractor", orgMovSep);
+
+//				waitKey(0);
+
+
+
+//		waitKey(0);
+//		Rect r = boundingRect(cnts[i]);
+//		ostringstream ss;
+//		ss <<area;
+//		putText(showMat, ss.str(), Point(r.x, r.y), FONT_HERSHEY_COMPLEX, 0.5,Scalar(255, 255, 255), 1, CV_AA);

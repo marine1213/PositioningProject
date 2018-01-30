@@ -17,8 +17,8 @@ using namespace std;
 
 
 // Dataset configurations
-#define VIDEO_FILE					"../Dataset/Intersection dataset/Custom Dataset/Jodoin/Sherbrooke/sherbrooke_video.avi"
-#define DATA_PATH					"../Dataset/Intersection dataset/Kwangsoo-dataset/"
+#define VIDEO_FILE					"../Dataset/Intersection dataset/Custom Dataset/Jodoin/Sherbrooke/sherbrooke_video.avi" // no video to use now
+#define DATA_PATH					"../Dataset/Kwangsoo-dataset/"
 #define DATASET_DATA				DATA_PATH"Sequence1d/"
 #define DATASET_DIR					DATASET_DATA"KAB_SK_1_undist/"
 #define ROI_FILEPATH				DATASET_DATA"Roi"

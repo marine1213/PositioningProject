@@ -1,1 +1,13 @@
-This is a git repo of Positioning Project
+The Source Code contains 3 main parts:
+
+- Main Process: main.cpp, main.h, extCommon.h, extOpencvHeader.h
+  + extCommon.h contains predefined constants to configure the whole system
+  + extOpencvHeader.h contains included opencv headers
+
+- Image Processing: ImgProcessing.cpp, ImageProcessing.h, cameraFrameWork.cpp, cameraFrameWork.h
+  + ImageProcessing.h all the defined image processing functions
+  + cameraFrameWork.h read the input sequence with various types of input: folder of images, video or static image
+
+- Supporting Function: Line.h, my_tools.cpp, my_tools.h
+  + the math functions that are used to support image processing function.
+

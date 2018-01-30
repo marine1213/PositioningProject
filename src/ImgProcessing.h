@@ -69,23 +69,45 @@ public:
 		osfileForProcessingTime.close();
 	}
 
+	// perform the main function in this method
+	// including: pre-process, cluster separation and occupied space estimation
+	// result evaluation function:
+	//       - car and truck tracking following ground truth
+	//       - IOU and DEER calculation
+	//       - draw and show the result
+	// added function: preventing interference of height to the estimation result
+	// next step: height estimation
 	Mat mainProcessing(Mat &input, int frameId, Mat *transformMat, Mat * ppmap, Mat *binMask = NULL);
+	// perform pre-process in this method
+	// including: minor shadow removal and background subtraction
 	Mat preProcessing(Mat &input,  Mat *binMask = NULL);
-	void testDft(Mat &input, string name);
 
+	// set up perspective map at the beginning
 	void setupPPMap(Mat &input, Mat * binMask = NULL,Mat *transformMat = NULL, Mat *ppmap = NULL, string fileName = "");
-	bool checkPtOnROI(Point p);
+	// read the MATLAB car ground truth file
 	bool getCarGroundTruthFromDataFile(string fileName);
+	// read the MATLAB truck ground truth file
 	bool getTruckGroundTruthFromDataFile(string fileName);
+	// draw the MATLAB car ground truth file
 	void showCarGroundTruthData(Mat &img,size_t frameId);
+	// draw the MATLAB truck ground truth file
 	void showTruckGroundTruthData(Mat &img, size_t frameId);
-
+	// return the number of detected cars on current frame
 	int getNumberOfCars(){
 		return numberOfCars;
 	}
+
+	// just to test - can be deleted
+	void testDft(Mat &input, string name);
+	// check if next point is on the border of selected ROI or not - can be deleted
+	// purpose: remove the contour when one of its point touch the ROI
+	bool checkPtOnROI(Point p);
 private:
+	// draw the ground truth after applied perspective map
 	void showGroundTruthDataOnPPMap(Mat &img, vector<vector<Point2f> > &gndSet, vector<Point2f> &ptsList,vector<Rect> &boundingList, Scalar lineColor, Mat &transformMat);
+	// read the ground truth data file and save the data to importedData
 	bool getGroundTruthFromDataFile( string fileName, vector<vector<vector<Point2f> > > &importedData);
+	// draw the ground truth data based on the point information and color
 	void showGroundTruthData(Mat &img, vector<vector<Point2f> > &gndCarsSet, Scalar lineColor);
 };
 

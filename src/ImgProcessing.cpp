@@ -15,17 +15,28 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
 	if(maskPreProc.rows == 1 && maskPreProc.cols == 1)
 		return maskPreProc;
 
-
+	// input contour and output contour
+	// idea is:
+	//        - from input contour list, good contour is put into output contour
+	//        - if the input contour has problem, it will create more than one intermediate contour
+	//        - then, new added contour in output is removed, and two new contours are added.
 	vector<vector<Point> > initCnts, finalResultCnts;
+	// not important variable
 	vector<Vec4i> movHier;
+	// matrix to draw the result
 	Mat finalResultMat = input.clone();// =  Mat::zeros(input.size(), CV_8UC3);
 
+	// the idea of merging the input and minor shadow removal contour to reduce defragment
+	// but the result has no considerable effect
 	Mat cntsMergedMat = Mat::zeros(input.size(), CV_8UC1);
+	// distance transform of previous image
 	Mat distanceMergedMat = Mat::zeros( input.size(), CV_8UC1 );
-	Mat drawing = Mat::zeros( input.size(), CV_8UC3 );
+	// draw color on this image for debugging - it is not used
+//	Mat drawing = Mat::zeros( input.size(), CV_8UC3 );
+	// debug the input
 	Mat cloneInput = input.clone();
 
-	// Find contours in mov mask
+	// Find contours in moving object mask
  	findContours(maskPreProc.clone(), initCnts, movHier, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
 
 
@@ -86,10 +97,10 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
     	size_t len = movCntsDist.size();
 		for (size_t i = 0; i < len; i++) {
 
-			RNG rng(12345);
-			Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255),rng.uniform(0, 255));
-			drawContours(drawing, movCntsDist, i, color, 1, 8, vector<Vec4i>(),0, Point());
-			drawContours(drawing, hullDistance, i, color, 1, 8, vector<Vec4i>(), 0,Point());
+//			RNG rng(12345);
+//			Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255),rng.uniform(0, 255));
+//			drawContours(drawing, movCntsDist, i, color, 1, 8, vector<Vec4i>(),0, Point());
+//			drawContours(drawing, hullDistance, i, color, 1, 8, vector<Vec4i>(), 0,Point());
 
 
 			cv::Point2f posOld, posOlder;
@@ -121,7 +132,7 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
 
 					//===== end of curvature calculation
 
-		            circle(drawing, ptFar, 2, Scalar(0, 255, 0), 1);
+//		            circle(drawing, ptFar, 2, Scalar(0, 255, 0), 1);
 		        }
 
 		    }
@@ -454,9 +465,9 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
 			for (size_t ptId = 0; ptId < edgeLines[hullPtId].size(); ++ptId) {
 				circle(hullPtsmat, edgeLines[hullPtId][ptId], 3, ptTop, -1);
 				circle(cloneInput, edgeLines[hullPtId][ptId], 3, ptTop, -1);
-				ostringstream oss2;
-				oss2 << (shownDebugData[hullPtId][ptId]);
-				putText(cloneInput, oss2.str(), edgeLines[hullPtId][ptId], FONT_HERSHEY_COMPLEX,0.7, Scalar(0, 0, 255), 1, 8);
+//				ostringstream oss2;
+//				oss2 << (shownDebugData[hullPtId][ptId]);
+//				putText(cloneInput, oss2.str(), edgeLines[hullPtId][ptId], FONT_HERSHEY_COMPLEX,0.7, Scalar(0, 0, 255), 1, 8);
 			}
 		}
 //		imshow("hull pts", hullPtsmat);

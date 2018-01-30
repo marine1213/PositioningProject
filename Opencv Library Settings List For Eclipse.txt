@@ -1,0 +1,32 @@
+Go to Properties of the project and add those settings with the path instruction
+(the rows should be added one by one, there is no quick way)
+
+*Settings->Tool Settings(Tab)-> GCC C++ Compiler(menu)->Includes(sub menu)-> Include paths(-I)(panel)
+/usr/local/include/opencv
+/usr/local/include
+
+*Settings->Tool Settings(Tab)-> GCC C++ Linker(menu)->Libraries(sub menu)->Libraries(-I) (panel)
+opencv_core
+opencv_photo
+opencv_imgcodecs
+opencv_calib3d
+opencv_contrib  
+opencv_features2d
+opencv_flann
+opencv_highgui
+opencv_imgproc
+opencv_legacy
+opencv_ml
+opencv_nonfree
+opencv_objdetect
+opencv_superres
+opencv_ts
+opencv_videoio
+opencv_videostab
+opencv_objdetect
+opencv_stitching
+opencv_video
+opencv_shape
+
+*Settings->Tool Settings(Tab)-> GCC C++ Linker(menu)->Libraries(sub menu)->Library search path(-L) (panel)
+/usr/local/lib

@@ -8,7 +8,21 @@
 #include "ImgProcessing.h"
 #include "Line.h"
 
-Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Mat * ppmap, Mat *binMask) {
+void carsSeparation(Mat cntsMat, vector<vector<Point> > *finalResultCnts, Mat *sepResult = NULL);
+void analyzeData(vector<vector<Point> > &inputCnts, BorderComponents &bot, BorderComponents &top, Mat *cloneInput);
+void showPointsOnMap(DataBundle &data, BorderComponents &botComp, BorderComponents &topComp, CarInformation &ci, Mat *ppMap, Scalar color=Scalar(128,255,24));
+// remove not seen vehicles
+void removeUncheckedVehicles(vector<vector<Point> > &centerPtList, vector<bool> &checkedList, vector<vector<double> > &iouList,vector<vector<double> > &deerList, ofstream &osFile, vector<double> &meanIouList, vector<double> &meanDeerList);
+// track the position of vehicles
+void trackVehicles(vector<vector<Point> > &lastCenterpts, vector<Point2f> &newCenterPts, vector<Rect> &boundingList,
+		vector<vector<double> > &iouList, vector<vector<double> > &deerList,
+		vector<bool> &checkedList, int resId, float iou, float deer );
+// fit lines to the contours and draw them on the image
+void fitLineToContour(vector<vector<Point2f> > &contours, vector<Vec4f> &outputLines, Mat *img);
+void drawLines(vector<Vec4f> &lines, float alpha, Scalar color, Mat &img);
+//void correctBottomLine(vector<vector<Point> > &hullCnts, EndingPoints &ep, BorderComponents &bottomPart, Mat *img);
+
+Mat ImgProcessing::mainProcessing(DataBundle &data,Mat &input, int frameId, Mat *binMask) {
 	Mat maskPreProc = preProcessing(input, binMask);
 
 	// exit if the preprocessing fails
@@ -20,25 +34,17 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
 	//        - from input contour list, good contour is put into output contour
 	//        - if the input contour has problem, it will create more than one intermediate contour
 	//        - then, new added contour in output is removed, and two new contours are added.
-	vector<vector<Point> > initCnts, finalResultCnts;
-	// not important variable
-	vector<Vec4i> movHier;
+	vector<vector<Point> > initCnts;
+	data.clear();
+
 	// matrix to draw the result
 	Mat finalResultMat = input.clone();// =  Mat::zeros(input.size(), CV_8UC3);
 
-	// the idea of merging the input and minor shadow removal contour to reduce defragment
-	// but the result has no considerable effect
-	Mat cntsMergedMat = Mat::zeros(input.size(), CV_8UC1);
-	// distance transform of previous image
-	Mat distanceMergedMat = Mat::zeros( input.size(), CV_8UC1 );
-	// draw color on this image for debugging - it is not used
-//	Mat drawing = Mat::zeros( input.size(), CV_8UC3 );
 	// debug the input
 	Mat cloneInput = input.clone();
 
 	// Find contours in moving object mask
- 	findContours(maskPreProc.clone(), initCnts, movHier, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
-
+ 	findContours(maskPreProc.clone(), initCnts, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
 
 	for (size_t cntId = 0; cntId < initCnts.size(); cntId++) {
 		Mat cntsMat =  Mat::zeros(input.size(), CV_8UC1);
@@ -48,492 +54,56 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
 			continue;
 
 
-		finalResultCnts.push_back(initCnts[cntId]);
+		data.finalResultCnts.push_back(initCnts[cntId]);
 		// draw a mask
-		drawContours(cntsMat, initCnts, cntId, Scalar(255), -1, 8, movHier);
+		drawContours(cntsMat, initCnts, cntId, Scalar(255), -1, 8, noArray());
 
-		//============================== Cars anti-fragmenting =========================
+		//============================== Cars Separation =========================
 
 		morphologyEx(cntsMat, cntsMat, MORPH_CLOSE, elm);
 
-//		imshow("cont mat", cntsMat);
-		bitwise_or(cntsMergedMat, cntsMat,cntsMergedMat);
-
-
-		//================= startOfSep ============ Cars separation ============================
-		// distance transform to separate 2 cars
-		Mat distanceImage = Mat::zeros(input.size(), CV_8UC1);
-		distanceTransform(cntsMat, distanceImage, DIST_L2, 5);
-		normalize(distanceImage, distanceImage, 0,255, NORM_MINMAX );
-
-		// threshold distance transform to apply separation
-		double maxNormDistance;
-		minMaxLoc(distanceImage, 0, &maxNormDistance);
-		threshold(distanceImage, distanceImage, 0.55 * maxNormDistance,255,THRESH_TOZERO);
-
-		Mat distImg8UC1;
-		distanceImage.convertTo(distImg8UC1, CV_8UC1, 255,0);
-		// show distance transform image
-		 bitwise_xor(distanceMergedMat,distImg8UC1,distanceMergedMat);
-//		 imshow("distance imge", distanceMergedMat);
-
-		// find markers for watershed by contours
-		vector<vector<Point> > movCntsDist;
-		findContours(distImg8UC1.clone(), movCntsDist, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
-
-		vector<vector<Point> > hullDistance(movCntsDist.size());
-		vector<vector<int> > hullDistanceId(movCntsDist.size());
-		vector<vector<Vec4i> > defects(movCntsDist.size());
-		for (size_t i = 0; i < movCntsDist.size(); i++) {
-			convexHull(movCntsDist[i], hullDistance[i], false);
-			convexHull(movCntsDist[i], hullDistanceId[i], false);
-			if(hullDistanceId[i].size() > 3)
-				convexityDefects(movCntsDist[i],hullDistanceId[i], defects[i]);
-		}
-
-		Point separatingPts[2];
-		bool isSeparatingLineExist = false;
-		/// Draw contours + hull results
-    	size_t len = movCntsDist.size();
-		for (size_t i = 0; i < len; i++) {
-
-//			RNG rng(12345);
-//			Scalar color = Scalar(rng.uniform(0, 255), rng.uniform(0, 255),rng.uniform(0, 255));
-//			drawContours(drawing, movCntsDist, i, color, 1, 8, vector<Vec4i>(),0, Point());
-//			drawContours(drawing, hullDistance, i, color, 1, 8, vector<Vec4i>(), 0,Point());
-
-
-			cv::Point2f posOld, posOlder;
-			cv::Point2f f1stDerivative, f2ndDerivative;
-
-			vector<int> defectIdList;
-
-			for (size_t j = 0; j < defects[i].size(); j++)
-		    {
-		    	Vec4i& v = defects[i][j];
-
-		    	// check if farId is between startId and endId or not
-		    	int startEndDist = (int)(len + (v[1] - v[0])) % len;
-		    	int startFarDist = (int)(len + (v[2] - v[0])) % len;
-
-		    	if(startEndDist < startFarDist)
-		    		// the farId is outside of start - end Id
-		    		continue;
-	            int faridx = v[2]; Point ptFar(movCntsDist[i][faridx]);
-	            //ignore the big size vehicle ( bus )
-				double directTest = pointPolygonTest(hullDistance[i], movCntsDist[i][faridx],false);
-
-	            // depth is approximately equal distance with point polygonTest
-	            // but may include the points that are outside of hull -- #stupid
-		        float depth = v[3] / 256.0 * directTest;
-		        if (depth > 4) //  filter defects by depth, e.g more than 10 - 4 is recommended
-		        {
-		        	defectIdList.push_back(j);
-
-					//===== end of curvature calculation
-
-//		            circle(drawing, ptFar, 2, Scalar(0, 255, 0), 1);
-		        }
-
-		    }
-			RotatedRect rect = minAreaRect(movCntsDist[i]);
-
-			if (defectIdList.size() > 2){
-				// if there are 3 points or more in defect point list
-				// find 2 nearest point to the center of this mov
-				double min1stDistVal, min2ndDistVal;
-				int min1stDistId = -1, min2ndDistId = -1;
-				for (size_t defectId = 0; defectId < defectIdList.size(); ++defectId) {
-					int faridx = defects[i][defectIdList[defectId]][2];
-					Point ptFar(movCntsDist[i][faridx]);
-					double d = sqrt(pow(ptFar.x - rect.center.x , 2) + pow(ptFar.y - rect.center.y , 2));
-					if(min1stDistId == -1 || min1stDistVal > d){
-						min1stDistVal = d;
-						min1stDistId = defectId;
-					}else if(min2ndDistId == -1 || min2ndDistVal > d){
-						min2ndDistVal = d;
-						min2ndDistId = defectId;
-					}
-				}
-				// found two nearest to center points
-				int faridx0 = defects[i][defectIdList[min1stDistId]][2];
-				separatingPts[0] = movCntsDist[i][faridx0];
-				int faridx1 = defects[i][defectIdList[min2ndDistId]][2];
-				separatingPts[1] = movCntsDist[i][faridx1];
-			}else if (defectIdList.size() == 2){
-				int faridx0 = defects[i][defectIdList[0]][2];
-				separatingPts[0] = movCntsDist[i][faridx0];
-				int faridx1 = defects[i][defectIdList[1]][2];
-				separatingPts[1] = movCntsDist[i][faridx1];
-			}
-			if(defectIdList.size() > 1){
-				isSeparatingLineExist = true;
-			}
-		}
-
-		// draw separating line and find the distance fragment again
-		if(isSeparatingLineExist){
-			movCntsDist.clear();
-//			imshow("before separating points applied",distImg8UC1);
-			line(distImg8UC1, separatingPts[0], separatingPts[1], Scalar(0),3,8);
-//			imshow("after separating points applied",distImg8UC1);
-			findContours(distImg8UC1, movCntsDist, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
-//			waitKey(0);
-		}
-
-		// number of contour is number of separated cars
-		if(movCntsDist.size() > 1){
-			finalResultCnts.pop_back();
-
-			Mat markers = Mat::zeros(input.rows, input.cols, CV_32SC1);
-
-			// draw area of markers
-			for (size_t cntIdDist = 0; cntIdDist < movCntsDist.size();cntIdDist++) {
-				drawContours(markers, movCntsDist, static_cast<int>(cntIdDist),Scalar::all(static_cast<int>(cntIdDist) + 1), -1);
-			}
-			circle(markers, Point(5, 5), 3, CV_RGB(255, 255, 255), -1);
-
-			Mat img8UC3;
-			cvtColor(cntsMat, img8UC3, CV_GRAY2BGR);
-			watershed(img8UC3, markers);
-
-			Mat mark = Mat::zeros(markers.size(), CV_8UC1);
-			markers.convertTo(mark, CV_8UC1);
-			bitwise_not(mark, mark);
-//			imshow("markers", mark);
-
-			//======================== Separation result analyzing ============================
-
-			for (size_t markerId = 1; markerId <= movCntsDist.size(); ++markerId) {
-				Mat markerExtractedMat = Mat::zeros(input.size(), CV_8UC1);
-
-				for (int i = 0; i < markers.rows; i++) {
-					for (int j = markers.cols - 1; j >= 0; j--) {
-						size_t index = markers.at<int>(i, j);
-						if (index == markerId){
-							markerExtractedMat.at<char>(i, j) = 255;
-						}
-						else
-							markerExtractedMat.at<char>(i, j) = 0;
-					}
-				}
-
-				vector<vector<Point> > separatedCnts;
-				findContours(markerExtractedMat.clone(), separatedCnts, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
-
-				for (size_t sepCntId = 0; sepCntId < separatedCnts.size(); ++sepCntId) {
-					finalResultCnts.push_back(separatedCnts[sepCntId]);
-					drawContours(finalResultMat,separatedCnts,sepCntId, Scalar(255,196,0),2);
-				}
-//				imshow("show mat", markerExtractedMat);
-			}
-		}
-	//=========== endofSep ===========
-
+//		carsSeparation(cntsMat, &(data.finalResultCnts), &finalResultMat);
 	}
 
+	//============================== Car model =========================
+	Mat ppMapClone = data.getPpMap().clone();
+	Mat ppMapTop = ppMapClone.clone();
+
+	BorderComponents botParts, topParts;
+	analyzeData(data.finalResultCnts, botParts, topParts, &cloneInput);
+
+	//============== optical flow ===============
+
+	//============== end of optical flow ===============
+	CarInformation ci;
+//	showPointsOnMap(data, topParts, ci, &ppMapTop, Scalar(234,110,230));
+	showPointsOnMap(data, botParts, topParts, ci, &ppMapClone);
+
 	//=========== Result Evaluation ===========
-//	vector<vector<Point2f> > mappedCnts;
-	vector<Point2f> resultCenterListPts;
-//	vector<double> areaResultList;
-	vector<Rect> boundingResultList;
 
-	vector<Point2f> carGndTruthListPts;
-//	vector<double> areaGndList;
-	vector<Rect> boundingCarTruthList;
-	vector<Point2f> truckGndTruthListPts;
-	vector<Rect> boundingtruckTruthList;
-	//============================== Flatten the contour =========================
+#if SHOW_GROUNDTRUTH_ON_MAP
+	Mat *	drawGroundTruth = &ppMapClone;
 
-	Mat bottomLineMat = Mat::zeros(grayInput.size(), CV_8UC1);
-	Mat hullPtsmat = Mat::zeros(grayInput.size(), CV_8UC3);
-	Mat ppMapClone = (*ppmap).clone();
-
-	vector<vector<Point> > hullCnts(finalResultCnts.size());
-
-	for (size_t i = 0; i < finalResultCnts.size(); ++i) {//bug here
-		Mat cntTempMat = Mat::zeros(grayInput.size(), CV_8UC1);
-
-		convexHull(finalResultCnts[i], hullCnts[i]);
-		drawContours(cntTempMat, hullCnts, i, Scalar(255), 1, 8, noArray());
-		drawContours(hullPtsmat, hullCnts, i, Scalar(255,255,255), 1, 8, noArray());
-
-		//==============first method bottom line extraction===============
-		vector<int> endingLeftId, endingRightId, endingBottomId; //, endingTopId;
-		vector<vector<Point2f> > bottomLines, topLayerPts, edgeLines;//, innerLines;
-		vector<vector<float> > shownDebugData;
-
-		Scalar ptColor = Scalar(0,255,0); //Scalar(255,180,160);
-		Scalar ptLeft = Scalar(255,255,0);
-		Scalar ptBottom = Scalar(0,0,255);
-		Scalar ptRight = Scalar(255,0,255);
-		Scalar ptTop = Scalar(0,255,255);
-		//===== find ending left and ending right separating contour into 2 parts ===
-		for (size_t hullLineId = 0; hullLineId < hullCnts.size(); ++hullLineId) {
-			int xleft, xright,ybottom, ytop;
-			endingLeftId.push_back(-1);
-			endingRightId.push_back(-1);
-			endingBottomId.push_back(-1);
-//			endingTopId.push_back(-1);
-			for (size_t hullPtId = 0; hullPtId < hullCnts[hullLineId].size(); ++hullPtId) {
-				if(endingLeftId.back() == -1 || xleft > hullCnts[hullLineId][hullPtId].x){
-					endingLeftId[hullLineId] = hullPtId;
-					xleft = hullCnts[hullLineId][hullPtId].x;
-				}
-				if (endingRightId.back() == -1|| xright < hullCnts[hullLineId][hullPtId].x) {
-					endingRightId[hullLineId]= hullPtId;
-					xright = hullCnts[hullLineId][hullPtId].x;
-				}
-				if (endingBottomId.back() == -1|| ybottom < hullCnts[hullLineId][hullPtId].y) {
-					endingBottomId[hullLineId]= hullPtId;
-					ybottom = hullCnts[hullLineId][hullPtId].y;
-				}
-//				if (endingTopId.back() == -1|| ytop > hullCnts[hullLineId][hullPtId].y) {
-//					endingTopId[hullLineId]= hullPtId;
-//					ytop = hullCnts[hullLineId][hullPtId].y;
-//				}
-			}
-			if(endingRightId.back() == -1)
-				endingRightId.pop_back();
-			if(endingLeftId.back() == -1)
-				endingLeftId.pop_back();
-			if(endingBottomId.back() == -1)
-				endingBottomId.pop_back();
-//			if(endingTopId.back() == -1)
-//				endingTopId.pop_back();
-		}
-
-
-		//==================== Analyze the corner of the car =====================
-		// find the actual side points with height estimation
-		for (size_t hullLineId = 0; hullLineId < endingLeftId.size(); ++hullLineId) {
-			Point sidePts[2] = {
-					hullCnts[hullLineId][endingLeftId[hullLineId]],
-					hullCnts[hullLineId][endingRightId[hullLineId]]
-			};
-			Point ptBotPt = hullCnts[hullLineId][endingBottomId[hullLineId]];
-//			Point ptTopPt = hullCnts[hullLineId][endingTopId[hullLineId]];
-			// find nearer point to the bottom
-			float minDistOf2vertices = -1;
-			int minId = -1;
-			for (int i = 0; i < 2; ++i) {
-				float d = ((ptBotPt.y - sidePts[i].y)^2) + ((ptBotPt.x - sidePts[i].x)^2);
-				if(minId == -1 || d < minDistOf2vertices){
-					minDistOf2vertices = d;
-					minId = i;
-				}
-			}
-			Line sideLine = Line(ptBotPt.x, ptBotPt.y, sidePts[1-minId].x, sidePts[1-minId].y);
-			float sideLineLength = sqrt(((ptBotPt.x - sidePts[1-minId].x)^2) + ((ptBotPt.y -  sidePts[1-minId].y)^2));
-			//todo: find the most distance poitn
-			int sideId[2] = {
-					endingLeftId[hullLineId],
-					endingRightId[hullLineId]
-			};
-			int startId, endId = endingBottomId[hullLineId];
-			if(sideId[1-minId] < endId){
-				startId = sideId[1-minId];
-			}else{
-				startId = endId;
-				endId = sideId[1-minId];
-			}
-			float maxRatioOfDistAndDiag = -1;
-			int maxIdPt = -1;
-			vector<Point2f> oneEdgeLine;
-			vector<float> itemData;
-			for (int ptId = startId; ptId <= endId; ++ptId) {
-				Point tempPt = hullCnts[hullLineId][ptId];
-				float tempDist = sideLine.distance(tempPt.x, tempPt.y)/sideLineLength;
-//				printf("\nThe tempDist of point %d car %d has dist %f",ptId,hullLineId,tempDist);
-				if(maxRatioOfDistAndDiag == -1 || tempDist >= maxRatioOfDistAndDiag){
-					maxRatioOfDistAndDiag = tempDist;
-					maxIdPt = ptId;
-				}
-			}
-			oneEdgeLine.push_back(hullCnts[hullLineId][maxIdPt]);
-			itemData.push_back(maxRatioOfDistAndDiag);
-//			printf("==========The max tempDist is %f", maxDistOfptList);
-			if(maxRatioOfDistAndDiag > 1.1){
-
-				float minDiffAngle = -1;
-				int minDiffIdPt = -1;
-				for (int ptId = maxIdPt; ptId < endId; ++ptId) {
-					Point tempPt = hullCnts[hullLineId][ptId];
-					// Large angle
-					Line maxToBtPt = Line(tempPt.x, tempPt.y, ptBotPt.x, ptBotPt.y);
-					Line maxToFarPt = Line(tempPt.x, tempPt.y, ptBotPt.x, ptBotPt.y);
-					float angleDeltaLarge = maxToBtPt.getAngle() - maxToFarPt.getAngle();
-					// Adjacent angle
-					Point frontPt = hullCnts[hullLineId][ptId+1];
-					Line maxToFront = Line(tempPt.x, tempPt.y, frontPt.x, frontPt.y);
-					Point prevPt = hullCnts[hullLineId][ptId-1];
-					Line maxToPrev = Line(tempPt.x, tempPt.y, prevPt.x, prevPt.y);
-					float angleDeltaAdjacent = maxToPrev.getAngle() - maxToFront.getAngle();
-					float tempAngle = abs(angleDeltaAdjacent - angleDeltaLarge);
-					// adjacent angle
-					if(minDiffAngle == -1 || tempAngle >= minDiffAngle){
-						minDiffAngle = tempAngle;
-						minDiffIdPt = ptId;
-					}
-				}
-
-				if(minId == 0){
-					endingRightId[hullLineId] = minDiffIdPt;
-				}else{
-					endingLeftId[hullLineId] = minDiffIdPt;
-				}
-			}
-//			Point dPt = ptBotPt - sidePts[minId];
-//			// Copy Points
-//
-//			vector<Point2f> oneCarLine;
-//			for (size_t ptId = 0; ptId < bottomLines[hullLineId].size(); ++ptId) {
-//				Point ptTemp = bottomLines[hullLineId][ptId];
-//				Point newTempPt = ptTemp - dPt;
-//				oneCarLine.push_back(newTempPt);
-//			}
-
-//			innerLines.push_back(oneCarLine);
-			edgeLines.push_back(oneEdgeLine);
-//			vector<Point2f> eachCarPts;
-//			eachCarPts.push_back(ptTopPt);
-//			eachCarPts.push_back(sidePts[minId]);
-//			topLayerPts.push_back(eachCarPts);
-
-			shownDebugData.push_back(itemData);
-		}
-
-		//==== extract only bottom line from hull contour =====
-		for (size_t hullLineId = 0; hullLineId < endingLeftId.size(); ++hullLineId) {
-//			int nearEndingLeftId = -1;
-			Point pt1 = hullCnts[hullLineId][endingLeftId[hullLineId]];
-			Point pt2 = hullCnts[hullLineId][endingRightId[hullLineId]];
-			Line diagLine = Line(pt1.x,pt1.y,pt2.x,pt2.y);
-			Point ptBotPt = hullCnts[hullLineId][endingBottomId[hullLineId]];
-			int ptBtDirection = diagLine.distance(ptBotPt.x,ptBotPt.y, true);
-			// Angles between
-
-			vector<Point2f> hullLine;
-			hullLine.push_back(pt2);
-			for (size_t hullPtId = 0; hullPtId < hullCnts[hullLineId].size(); ++hullPtId) {
-				Point ptTemp = hullCnts[hullLineId][hullPtId];
-				int ptTempDirection = diagLine.distance(ptTemp.x,ptTemp.y,true);
-				if(ptBtDirection*ptTempDirection > 0){
-					hullLine.push_back(ptTemp);
-//					size_t leftEndPtId = endingLeftId[hullLineId];
-//					if(hullPtId == (size_t)(leftEndPtId + 2) || hullPtId == leftEndPtId - 2){
-//						nearEndingLeftId = hullPtId;
-//					}
-				}
-			}
-			hullLine.push_back(pt1);
-//			endingLeftId[hullLineId] = nearEndingLeftId;
-			bottomLines.push_back(hullLine);
-		}
-		//====show marked points======
-		for (size_t hullLineId = 0; hullLineId < bottomLines.size(); ++hullLineId) {
-			for (size_t hullPtId = 0; hullPtId < bottomLines[hullLineId].size(); ++hullPtId) {
-				circle(hullPtsmat, hullCnts[hullLineId][hullPtId],3, ptColor, -1);
-				circle(cloneInput, hullCnts[hullLineId][hullPtId],3, ptColor, -1);
-				if(hullPtId < bottomLines[hullLineId].size() - 1)
-					line(cloneInput, hullCnts[hullLineId][hullPtId], hullCnts[hullLineId][hullPtId+1],Scalar(128,255,24),2);
-			}
-		}
-		for (size_t hullPtId = 0; hullPtId < endingLeftId.size(); ++hullPtId) {
-			circle(hullPtsmat, hullCnts[hullPtId][endingLeftId[hullPtId]],3, ptColor, -1);
-			circle(cloneInput, hullCnts[hullPtId][endingLeftId[hullPtId]],3, ptColor, -1);
-		}
-		for (size_t hullPtId = 0; hullPtId < endingRightId.size(); ++hullPtId) {
-			circle(hullPtsmat, hullCnts[hullPtId][endingRightId[hullPtId]],3, ptColor, -1);
-			circle(cloneInput, hullCnts[hullPtId][endingRightId[hullPtId]],3, ptColor, -1);
-		}
-		for (size_t hullPtId = 0; hullPtId < endingBottomId.size(); ++hullPtId) {
-			circle(hullPtsmat, hullCnts[hullPtId][endingBottomId[hullPtId]],3, ptBottom, -1);
-			circle(cloneInput, hullCnts[hullPtId][endingBottomId[hullPtId]],3, ptBottom, -1);
-		}
-//		for (size_t hullPtId = 0; hullPtId < endingTopId.size(); ++hullPtId) {
-//			circle(hullPtsmat, hullCnts[hullPtId][endingTopId[hullPtId]],3, ptTop, -1);
-//			circle(cloneInput, hullCnts[hullPtId][endingTopId[hullPtId]],3, ptTop, -1);
-//		}
-//		for (size_t hullPtId = 0; hullPtId < innerLines.size(); ++hullPtId) {
-//			for (size_t ptId = 0; ptId < innerLines[hullPtId].size(); ++ptId) {
-//				circle(hullPtsmat, innerLines[hullPtId][ptId],3, ptTop, -1);
-//				circle(cloneInput, innerLines[hullPtId][ptId],3, ptTop, -1);
-//			}
-//		}
-		for (size_t hullPtId = 0; hullPtId < edgeLines.size(); ++hullPtId) {
-			for (size_t ptId = 0; ptId < edgeLines[hullPtId].size(); ++ptId) {
-				circle(hullPtsmat, edgeLines[hullPtId][ptId], 3, ptTop, -1);
-				circle(cloneInput, edgeLines[hullPtId][ptId], 3, ptTop, -1);
-//				ostringstream oss2;
-//				oss2 << (shownDebugData[hullPtId][ptId]);
-//				putText(cloneInput, oss2.str(), edgeLines[hullPtId][ptId], FONT_HERSHEY_COMPLEX,0.7, Scalar(0, 0, 255), 1, 8);
-			}
-		}
-//		imshow("hull pts", hullPtsmat);
-		imshow("hull pts Input clone", cloneInput);
-//		waitKey(0);
-
-		//====show map and point===
-		vector<Point2f> centerPtsInMap;
-		for (size_t linesId = 0; linesId < bottomLines.size(); ++linesId) {
-			vector<Point2f> outputPerspect(bottomLines[linesId].size());
-//			vector<Point2f> ppTop(topLayerPts.size());
-			if(outputPerspect.size() == 0)
-				continue;
-
-			perspectiveTransform(bottomLines[linesId], outputPerspect, (*transformMat));
-//			perspectiveTransform(topLayerPts[linesId], ppTop, (*transformMat));
-
-			// find center points
-			Point2f firstBtpt = outputPerspect[outputPerspect.size() - 1];
-			Point2f lastBtPt = outputPerspect[0];
-			Point2f centerPt((firstBtpt.x + lastBtPt.x)/2,(firstBtpt.y + lastBtPt.y)/2);
-
-			// save center point
-			circle(ppMapClone, centerPt,3, Scalar(0,255,0), -1);
-
-//			for (unsigned id = 0; id < topLayerPts.size(); ++id) {
-//				circle(ppMapClone, ppTop[id], 3, Scalar(0,255,255), -1);
-//			}
-
-			centerPtsInMap.push_back(centerPt);
-			// find symmetric points
-			size_t lengthOfbottomPts = outputPerspect.size();
-			for (size_t hullPtId = 0; hullPtId < lengthOfbottomPts;++hullPtId) {
-				Point2f firstPt = outputPerspect[hullPtId];
-				Point2f nextPt(2*centerPt.x - firstPt.x, 2*centerPt.y - firstPt.y);
-				outputPerspect.push_back(nextPt);
-			}
-
-//			mappedCnts.push_back(outputPerspect);
-			resultCenterListPts.push_back(centerPt);
-//			double areaFull = contourArea(outputPerspect);
-//			areaResultList.push_back(areaFull);
-			Rect bRect = boundingRect(outputPerspect);
-			boundingResultList.push_back(bRect);
-
-			// show mapped points
-			for (size_t ppPtId = 0; ppPtId < outputPerspect.size();++ppPtId) {
-/*//				circle(ppMapClone, outputPerspect[ppPtId], 3, Scalar(0,0,255), -1);*/
-				line(ppMapClone, outputPerspect[ppPtId], outputPerspect[(ppPtId+1)%outputPerspect.size()],Scalar(128,255,24),2);
-			}
-/*
-//			circle(ppMapClone, outputPerspect[outputPerspect.size() - 1],3, ptRight, -1);
-//			circle(ppMapClone, outputPerspect[0],3, ptLeft, -1);
-*/
-		}
+	for (size_t i = 0; i < data.getFinalResultCnts().size(); ++i) {
 
 		//--- ground truth data ---
 		if(frameId > 1){
-
+			// synchronize the input sequence with laser scanner data
 			vector<vector<Point2f> > gndCarsSet = gndTruthForCar[(frameId - 2)/2];
 			vector<vector<Point2f> > gndTrucksSet = gndTruthForTruck[(frameId - 2)/2];
 
-			showGroundTruthDataOnPPMap(ppMapClone, gndCarsSet, carGndTruthListPts, boundingCarTruthList, Scalar(255,0,0),*transformMat);
-			showGroundTruthDataOnPPMap(ppMapClone, gndTrucksSet, truckGndTruthListPts, boundingtruckTruthList, Scalar(0,255,255),*transformMat);
+			showGroundTruthDataOnPPMap(drawGroundTruth, gndCarsSet, data.carGndTruthListPts, data.boundingCarTruthList, Scalar(255,0,0),data.transformMat);
+			showGroundTruthDataOnPPMap(drawGroundTruth, gndTrucksSet, data.truckGndTruthListPts, data.boundingtruckTruthList, Scalar(0,255,255),data.transformMat);
 		}
 	}
+#endif
+#if NO_ACCURACY_EVALUATION
+	groundTruthComparing(data, ci, &ppMapClone);
+#endif
+	return ppMapClone;
+}
+
+void ImgProcessing::groundTruthComparing(DataBundle &data, CarInformation &ci, Mat *ppMapClone){
 
 	/**
 	 * the number of vehicles in last detection is saved in lastNumberofCenterPts
@@ -548,10 +118,10 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
 	vector<bool> checkedCarIdList(lastNumberOfCarCenterPts);
 	vector<bool> checkedTruckIdList(lastNumberOfTruckCenterPts);
 
-	for (size_t resId = 0; resId < resultCenterListPts.size(); ++resId) {
+	for (size_t resId = 0; resId < ci.getResultCenterListPts().size(); ++resId) {
 
 		// if the vehicle center is not inside a contour, skip
-		double isInsideROI = pointPolygonTest(roiContour, resultCenterListPts[resId], false);
+		double isInsideROI = pointPolygonTest(roiContour, ci.getResultCenterListPts()[resId], false);
 		if(isInsideROI<0)
 			continue;
 
@@ -560,9 +130,9 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
 		// mapping 2 contours - find minimum distance between 2 types of center points
 		double minDistane = -1;
 		int minId = -1;
-		for (size_t gndId = 0; gndId < carGndTruthListPts.size(); ++gndId) {
-			double dx = resultCenterListPts[resId].x - carGndTruthListPts[gndId].x;
-			double dy = resultCenterListPts[resId].y - carGndTruthListPts[gndId].y;
+		for (size_t gndId = 0; gndId < data.carGndTruthListPts.size(); ++gndId) {
+			double dx = ci.getResultCenterListPts()[resId].x - data.carGndTruthListPts[gndId].x;
+			double dy = ci.getResultCenterListPts()[resId].y - data.carGndTruthListPts[gndId].y;
 			double thisDistane = sqrt(dx * dx + dy * dy);
 			if (minDistane == -1 || minDistane > thisDistane) {
 				minDistane = thisDistane;
@@ -573,9 +143,9 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
 		if(minDistane >= 100){
 			minDistane = -1;
 			isTruckInGndTruth = true;
-			for (size_t gndId = 0; gndId < truckGndTruthListPts.size(); ++gndId) {
-				double dx = resultCenterListPts[resId].x- truckGndTruthListPts[gndId].x;
-				double dy = resultCenterListPts[resId].y- truckGndTruthListPts[gndId].y;
+			for (size_t gndId = 0; gndId < data.truckGndTruthListPts.size(); ++gndId) {
+				double dx = ci.resultCenterListPts[resId].x- data.truckGndTruthListPts[gndId].x;
+				double dy = ci.resultCenterListPts[resId].y- data.truckGndTruthListPts[gndId].y;
 				double thisDistane = sqrt(dx * dx + dy * dy);
 				if (minDistane == -1 || minDistane > thisDistane) {
 					minDistane = thisDistane;
@@ -589,13 +159,23 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
 		// only evaluate with nearest ground truth point and the distance is smaller than 100
 		if (minId > -1 && minDistane < 100 && minDistane > -1) {
 			Rect bTruthRect;
-			Rect bResultRect = boundingResultList[resId];
+			Rect bResultRect = ci.boundingResultList[resId];
+//			float carVirtualHeightX = ci.carVirtualHeightsX[resId];	// Delta x
+//			float carVirtualHeightY = ci.carVirtualHeightsY[resId];	// Delta y
+//			float carWidth = ci.carWidths[resId];
+//			float carLength = ci.carLengths[resId];
+//			Point2f shadowBaseX = ci.shadowX[resId];
+//			Point2f shadowBaseY = ci.shadowY[resId];
+
+			// formula
+//			float carHeightX = 1/(0.2 + ((shadowBaseX.x) + carWidth)/(carVirtualHeightX - carWidth));
+//			float carHeightY = 1/(0.2 + ((shadowBaseY.y) + carLength)/(carVirtualHeightY - carWidth));
+//			float carHeight = sqrt(carHeightX*carHeightX + carHeightY*carHeightY);
 
 			if(isTruckInGndTruth)
-				bTruthRect = boundingtruckTruthList[minId];
+				bTruthRect = data.boundingtruckTruthList[minId];
 			else
-				bTruthRect = boundingCarTruthList[minId];
-
+				bTruthRect = data.boundingCarTruthList[minId];
 
 			Rect intersectionRect = bTruthRect & bResultRect;
 			double intersectArea = intersectionRect.area();
@@ -603,342 +183,787 @@ Mat ImgProcessing::mainProcessing(Mat &input, int frameId, Mat *transformMat, Ma
 
 			double diagonalLine = sqrt(bTruthRect.width*bTruthRect.width + bTruthRect.height+bTruthRect.height);
 			diagonalEccentricRatio = minDistane / diagonalLine;
-//============================Car Tracking part===============================
+//============================Tracking part===============================
 			if(!isTruckInGndTruth){
-				// check if the center points belong to saved cars or not
-				bool isCarSavedBefore =false;
-				size_t carSavedId;
-				for (carSavedId = 0; carSavedId < lastNumberOfCarCenterPts; ++carSavedId) {
-					Point lastSavedPt = savedCarCenterPoints[carSavedId].back();
-					Rect bResultRect = boundingResultList[resId];
-					bool rectXbool = bResultRect.x < lastSavedPt.x && lastSavedPt.x < bResultRect.x + bResultRect.width;
-					bool rectYbool = bResultRect.y < lastSavedPt.y && lastSavedPt.y < bResultRect.y + bResultRect.height;
-					if(rectXbool && rectYbool){
-						isCarSavedBefore = true;
-						savedCarCenterPoints[carSavedId].push_back(resultCenterListPts[resId]);
-						checkedCarIdList[carSavedId] = true;
-						break;
-					}
-				}
-
-				// the car is not saved before, add new car
-				if (!isCarSavedBefore) {
-					vector<Point> newCarPoints;
-					newCarPoints.push_back(resultCenterListPts[resId]);
-					savedCarCenterPoints.push_back(newCarPoints);
-
-					vector<double> newCarIOUs;
-					savedCarIOUs.push_back(newCarIOUs);
-					vector<double> newErrorDistance;
-					savedCarErrorDistance.push_back(newErrorDistance);
-				}
-				if(carSavedId < savedCarIOUs.size()){
-					savedCarIOUs[carSavedId].push_back(iou);
-					savedCarErrorDistance[carSavedId].push_back(diagonalEccentricRatio);
-				}
+				trackVehicles(savedCarCenterPoints, ci.resultCenterListPts, ci.boundingResultList, savedCarIOUs, savedCarErrorDistance,
+						checkedCarIdList, resId, iou, diagonalEccentricRatio);
+			}else{
+				trackVehicles(savedTruckCenterPoints, ci.resultCenterListPts, ci.boundingResultList, savedTruckIOUs, savedTruckErrorDistance,
+						checkedTruckIdList, resId, iou, diagonalEccentricRatio);
 			}
-//============================End of Car Tracking part===============================
-//============================Truck Tracking part===============================
-			else{
-				// check if the center points belong to saved trucks or not
-				bool isTruckSavedBefore =false;
-				size_t truckSavedId;
-				for (truckSavedId = 0; truckSavedId < lastNumberOfTruckCenterPts; ++truckSavedId) {
-					Point lastSavedPt = savedTruckCenterPoints[truckSavedId].back();
-					Rect bResultRect = boundingResultList[resId];
-					bool rectXbool = bResultRect.x < lastSavedPt.x && lastSavedPt.x < bResultRect.x + bResultRect.width;
-					bool rectYbool = bResultRect.y < lastSavedPt.y && lastSavedPt.y < bResultRect.y + bResultRect.height;
-					if(rectXbool && rectYbool){
-						isTruckSavedBefore = true;
-						savedTruckCenterPoints[truckSavedId].push_back(resultCenterListPts[resId]);
-						checkedTruckIdList[truckSavedId] = true;
-						break;
-					}
-				}
+//============================End of Tracking part===============================
 
-				// the Truck is not saved before, add new Truck
-				if (!isTruckSavedBefore) {
-					vector<Point> newTruckPoints;
-					newTruckPoints.push_back(resultCenterListPts[resId]);
-					savedTruckCenterPoints.push_back(newTruckPoints);
-
-					vector<double> newTruckIOUs;
-					savedTruckIOUs.push_back(newTruckIOUs);
-					vector<double> newErrorDistance;
-					savedTruckErrorDistance.push_back(newErrorDistance);
-				}
-				if(truckSavedId < savedTruckIOUs.size()){
-					savedTruckIOUs[truckSavedId].push_back(iou);
-					savedTruckErrorDistance[truckSavedId].push_back(diagonalEccentricRatio);
-				}
-			}
-//============================End of Truck Tracking part===============================
-//			rectangle(ppMapClone, intersectionRect,Scalar(128,255,196),-1,8);
-//			rectangle(ppMapClone, boundingTruthList[minId],Scalar(0,255,196),2,8);
-//			areaRatio = (int) (areaResultList[resId] / areaGndList[minId] * 1000);
-
-//			osfile<<iou<<"\t"<<minDistane<<"\t"<<distanceRatio<<endl;
 			ostringstream oss2;
-			oss2 << (int)(iou*100);
+			oss2 << (int)(iou*100);	// in percent
+//			oss2 << (carHeight);
 			//Todo problem is here
-			if(isTruckInGndTruth)
-				putText(ppMapClone, oss2.str(), Point(truckGndTruthListPts[minId].x, truckGndTruthListPts[minId].y - 10), FONT_HERSHEY_COMPLEX,0.7, Scalar(0, 0, 255), 1, 8);
-			else
-				putText(ppMapClone, oss2.str(), Point(carGndTruthListPts[minId].x, carGndTruthListPts[minId].y - 10), FONT_HERSHEY_COMPLEX,0.7, Scalar(0, 0, 255), 1, 8);
-			circle(ppMapClone, resultCenterListPts[resId], 2, Scalar(96, 255, 96), 2);
-		}
-
-//		ostringstream oss;
-//		oss<< (int)(areaRatio)<<'%';
-//		putText(ppMapClone, oss.str(), Point(gndTruthListPts[minId].x, gndTruthListPts[minId].y + 10), FONT_HERSHEY_COMPLEX, 0.7, Scalar(0,0,255),1,8);
-//		circle(ppMapClone, gndTruthListPts[minId], 2, Scalar(96, 128, 255),2);
-	}
-
-	//======== remove not checked car center points ============
-	int carErasingTimes = 0;
-	for (size_t carCenterPtId = 0; carCenterPtId < checkedCarIdList.size(); ++carCenterPtId) {
-		// browse the list if the car is checked or not
-		if(checkedCarIdList[carCenterPtId] == false){
-			// check if the number of saved IOU is larger than 5
-			// if not, it means the sudden object appeared for a short time
-			// and is considered to be spike noise
-			if(savedCarIOUs[carCenterPtId].size() > 5){
-				double sumIOU = 0, sumErrorDistance = 0;
-				osfileForCar<<savedCarIOUs[carCenterPtId].size()<<'\t';
-				for (size_t iouId = 0; iouId < savedCarIOUs[carCenterPtId].size(); ++iouId) {
-					sumIOU += savedCarIOUs[carCenterPtId][iouId];
-					sumErrorDistance += savedCarErrorDistance[carCenterPtId][iouId];
-//					osfile<<savedIOUs[centerPtId][iouId]<<'\t';
-//					osfileForCar<<savedCarErrorDistance[carCenterPtId][iouId]<<'\t';
-				}
-				double averageIOUval = sumIOU/savedCarIOUs[carCenterPtId].size();
-				double averageErrorDist = sumErrorDistance/savedCarErrorDistance[carCenterPtId].size();
-				averageCarIOUs.push_back(averageIOUval);
-				averageCarErrorDistance.push_back(averageErrorDist);
-				osfileForCar<< averageIOUval<<'\t'<<averageErrorDist<<endl;
-//				osfileForCar<<endl;
+			if(ppMapClone){
+				if(isTruckInGndTruth)
+						putText(*ppMapClone, oss2.str(), Point(data.truckGndTruthListPts[minId].x, data.truckGndTruthListPts[minId].y - 10), FONT_HERSHEY_COMPLEX,0.7, Scalar(0, 0, 255), 1, 8);
+					else
+						putText(*ppMapClone, oss2.str(), Point(data.carGndTruthListPts[minId].x, data.carGndTruthListPts[minId].y - 10), FONT_HERSHEY_COMPLEX,0.7, Scalar(0, 0, 255), 1, 8);
+				circle(*ppMapClone, ci.resultCenterListPts[resId], 2, Scalar(96, 255, 96), 2);
 			}
-
-			// remove saved coordinates
-			savedCarCenterPoints.erase(savedCarCenterPoints.begin() + carCenterPtId - carErasingTimes);
-			// remove saved IOU
-			savedCarIOUs.erase(savedCarIOUs.begin() + carCenterPtId - carErasingTimes);
-
-			carErasingTimes++;
 		}
-	}
-	//======== remove not checked truck center points ============
-	int truckErasingTimes = 0;
-	for (size_t truckCenterPtId = 0; truckCenterPtId < checkedTruckIdList.size(); ++truckCenterPtId) {
-		// browse the list if the Truck is checked or not
-		if(checkedTruckIdList[truckCenterPtId] == false){
-			// check if the number of saved IOU is larger than 10
-			// if not, it means the sudden object appeared for a short time
-			// and is considered to be spike noise
-			if(savedTruckIOUs[truckCenterPtId].size() > 10){
-				double sumIOU = 0, sumErrorDistance = 0;
-				osfileForTruck<<savedTruckIOUs[truckCenterPtId].size()<<'\t';
-				for (size_t iouId = 0; iouId < savedTruckIOUs[truckCenterPtId].size(); ++iouId) {
-					sumIOU += savedTruckIOUs[truckCenterPtId][iouId];
-					sumErrorDistance += savedTruckErrorDistance[truckCenterPtId][iouId];
-//					osfileForTruck<<savedTruckErrorDistance[truckCenterPtId][iouId]<<'\t';
-				}
-				double averageIOUval = sumIOU/savedTruckIOUs[truckCenterPtId].size();
-				double averageErrorDist = sumErrorDistance/savedTruckErrorDistance[truckCenterPtId].size();
-				averageTruckIOUs.push_back(averageIOUval);
-				averageTruckErrorDistance.push_back(averageErrorDist);
-				osfileForTruck<< averageIOUval<<'\t'<<averageErrorDist<<endl;
-//				osfileForTruck<<endl;
-			}
 
-			// remove saved coordinates
-			savedTruckCenterPoints.erase(savedTruckCenterPoints.begin() + truckCenterPtId - truckErasingTimes);
-			// remove saved IOU
-			savedTruckIOUs.erase(savedTruckIOUs.begin() + truckCenterPtId - truckErasingTimes);
-
-			truckErasingTimes++;
-		}
 	}
+
+	//======== remove not checked center points ============
+	removeUncheckedVehicles(savedCarCenterPoints, checkedCarIdList, savedCarIOUs, savedCarErrorDistance, osfileForCar, averageCarIOUs, averageCarIOUs);
+	removeUncheckedVehicles(savedTruckCenterPoints, checkedTruckIdList, savedTruckIOUs, savedTruckErrorDistance, osfileForTruck, averageTruckIOUs, averageTruckIOUs);
+
 	//============================================================
 	ostringstream oss;
 	oss << "No. Vehicles: " << savedCarIOUs.size() + savedTruckIOUs.size();
-	putText(ppMapClone, oss.str(), Point(30, 90), FONT_HERSHEY_COMPLEX,  0.8, Scalar(255,255,255),2);
+	if(ppMapClone){
+		putText(*ppMapClone, oss.str(), Point(30, 90), FONT_HERSHEY_COMPLEX,  0.8, Scalar(255,255,255),2);
+	}
 
 	numberOfCars = savedCarIOUs.size();
 
-//	imshow("pp map", ppMapClone);
-//	waitKey(0);
-//	imshow("hull pts", hullPtsmat);
-/*
+}
 
-//	for (size_t i = 0; i < finalResultCnts.size(); ++i) {
-//		RotatedRect rotRect = minAreaRect(finalResultCnts[i]);
-//		Point2f pts[4];
-//		rotRect.points(pts);
+void drawLines(vector<Vec4f> &lines, float alpha, Scalar color, Mat &img){
+	for (int cntId = 0; cntId < (int)lines.size(); ++cntId) {
+		if(!(lines.empty())){
+			Vec4f aLine = lines[cntId];
+			Point p1 = Point(aLine[2]-alpha*aLine[0],aLine[3]-alpha*aLine[1]);
+			Point p2 = Point(aLine[2]+alpha*aLine[0],aLine[3]+alpha*aLine[1]);
+			line(img, p1, p2,color,4);
+		}
+	}
+}
+
+void fitLineToContour(vector<vector<Point2f> > &contours, vector<Vec4f> &outputLines, Mat *img){
+	vector<Vec4f> lines(contours.size());
+	for (size_t cntId = 0; cntId < contours.size(); ++cntId) {
+		if (!(contours[cntId].empty())) {
+			fitLine(contours[cntId], lines[cntId], CV_DIST_L2, 0, 10,0.01);
+		}
+	}
+	outputLines = lines;
+	if(img)
+		drawLines(lines, 50, Scalar(128,255,209), *img);
+}
+
+// join two lines to create the point outside border
+void generatePointsFromBorderLines(vector<vector<Point> > &hullCnts, EndingPoints &ep, BorderComponents &bot, Mat *img){
+	for (size_t cntId = 0; cntId < bot.leftLines.size(); ++cntId) {
+		vector<Point2f> pointList;
+
+		Vec4f mv4f = bot.leftLines[cntId];
+		Point2f p1 = Point2f(mv4f[2] + 1000 * mv4f[0], mv4f[3] + 1000 * mv4f[1]);
+		Point2f p2 = Point2f(mv4f[2] - 1000 * mv4f[0], mv4f[3] - 1000 * mv4f[1]);
+		Line leftLine = Line(p1.x, p1.y, p2.x, p2.y );
+		Vec4f mv4f2 = bot.rightLines[cntId];
+		Point2f p1r = Point2f(mv4f2[2] + 1000 * mv4f2[0], mv4f2[3] + 1000 * mv4f2[1]);
+		Point2f p2r = Point2f(mv4f2[2] - 1000 * mv4f2[0], mv4f2[3] - 1000 * mv4f2[1]);
+		Line rightLine = Line(p1r.x, p1r.y, p2r.x, p2r.y );
+		float bottomPoint[2];
+		rightLine.cross(leftLine, bottomPoint);
+
+		// evaluate ending left point and right point
+		Point endingLeftPt = hullCnts[cntId][ep.leftId[cntId]];
+//		float leftPtDist = leftLine.distance(endingLeftPt.x, endingLeftPt.y);
+		Point endingRightPt = hullCnts[cntId][ep.rightId[cntId]];
+//		float rightPtDist = rightLine.distance(endingRightPt.x, endingRightPt.y);
+
+		Line leftRight = Line(endingLeftPt.x, endingLeftPt.y, endingRightPt.x, endingRightPt.y);
+		int bottomDirection = leftRight.distance(bottomPoint[0],bottomPoint[1],true);
+
+		bool addedLeft = false;
+		// save the points - first, left point
+		for (size_t ptId = 0; ptId < hullCnts[cntId].size(); ++ptId) {
+
+			//check direction to bottom
+			Point tempPt = hullCnts[cntId][ep.leftId[cntId] + ptId];
+			int tempDirection = leftRight.distance(tempPt.x, tempPt.y, true);
+			int sign = tempDirection * bottomDirection > 0 ? 1 : -1;
+
+			// estimage point based on distance
+			int rectifiedId = (ep.leftId[cntId] + sign * ptId) % hullCnts[cntId].size();
+			Point pt = hullCnts[cntId][rectifiedId];
+			float distance = leftLine.distance(pt.x,pt.y);
+
+			if(distance < 7){
+				pointList.push_back(leftLine.shadow(pt.x,pt.y));
+				addedLeft = true;
+				break;
+			}
+		}
+		if(!addedLeft){
+			pointList.push_back(leftLine.shadow(endingLeftPt.x, endingLeftPt.y));
+		}
+
+		bool addedRight = false;
+
+		// save the points - second, the bottom point
+		pointList.push_back(Point2f(bottomPoint[0], bottomPoint[1]));
+
+		// save the points - third, the right point
+		for (size_t ptId = 0; ptId < hullCnts[cntId].size(); ++ptId) {
+
+			//check direction to bottom
+			Point tempPt = hullCnts[cntId][ep.rightId[cntId] + ptId];
+			int tempDirection = leftRight.distance(tempPt.x, tempPt.y, true);
+			int sign = tempDirection * bottomDirection > 0 ? 1 : -1;
+
+			// estimage point based on distance
+			int rectifiedId = (ep.rightId[cntId] + sign * ptId) % hullCnts[cntId].size();
+			Point pt = hullCnts[cntId][rectifiedId];
+			float distance = rightLine.distance(pt.x,pt.y);
+
+			if(distance < 3){
+				pointList.push_back(rightLine.shadow(pt.x,pt.y));
+				addedRight = true;
+				break;
+			}
+		}
+		if(!addedRight){
+			pointList.push_back(rightLine.shadow(endingRightPt.x,endingRightPt.y));
+		}
+
+
+		if(img){ // For debugging
+//			line(*img, p1, p2, Scalar(234,31,35),2);
+//			line(*img, p1r, p2r, Scalar(234,31,35),2);
+			// show estimated vertices of cars
+			for (size_t ptId = 0; ptId < pointList.size(); ++ptId) {
+				circle(*img, pointList[ptId], 2, Scalar(0,0,255),2);
+			}
+		}
+		bot.botLinePoint.push_back(pointList);
+	}
+}
+
+
+void removeUncheckedVehicles(vector<vector<Point> > &centerPtList, vector<bool> &checkedList, vector<vector<double> > &iouList,vector<vector<double> > &deerList, ofstream &osFile, vector<double> &meanIouList, vector<double> &meanDeerList){
+	int erasingTimes = 0;
+	for (size_t centerPtId = 0; centerPtId < checkedList.size(); ++centerPtId) {
+		// browse the list if the car is checked or not
+		if(checkedList[centerPtId] == false){
+			// check if the number of saved IOU is larger than 5
+			// if not, it means the sudden object appeared for a short time
+			// and is considered to be spike noise
+			if(!iouList.empty() && iouList[centerPtId].size() > 5){
+				double sumIOU = 0, sumErrorDistance = 0;
+				osFile<<iouList[centerPtId].size()<<'\t';
+				for (size_t iouId = 0; iouId < iouList[centerPtId].size(); ++iouId) {
+					sumIOU += iouList[centerPtId][iouId];
+					sumErrorDistance += deerList[centerPtId][iouId];
+				}
+				// if the car is not seen anymore its data is calculated and saved to respect file
+				double averageIOUval = sumIOU/iouList[centerPtId].size();
+				double averageErrorDist = sumErrorDistance/deerList[centerPtId].size();
+				meanIouList.push_back(averageIOUval);
+				meanDeerList.push_back(averageErrorDist);
+				osFile<< averageIOUval<<'\t'<<averageErrorDist<<endl;
+			}
+
+			// remove saved coordinates
+			centerPtList.erase(centerPtList.begin() + centerPtId - erasingTimes);
+			// remove saved IOU
+			if(!iouList.empty())
+				iouList.erase(iouList.begin() + centerPtId - erasingTimes);
+
+			erasingTimes++;
+		}
+	}
+}
+
+void trackVehicles(vector<vector<Point> > &lastCenterpts, vector<Point2f> &newCenterPts, vector<Rect> &boundingList,
+		vector<vector<double> > &iouList, vector<vector<double> > &deerList,
+		vector<bool> &checkedList, int resId, float iou, float deer ){
+	// check if the center points belong to saved cars or not
+	bool isSavedBefore =false;
+	size_t savedId;
+	for (savedId = 0; savedId < checkedList.size(); ++savedId) {
+		Point lastSavedPt = lastCenterpts[savedId].back();
+		Rect bResultRect = boundingList[resId];
+		bool rectXbool = bResultRect.x < lastSavedPt.x && lastSavedPt.x < bResultRect.x + bResultRect.width;
+		bool rectYbool = bResultRect.y < lastSavedPt.y && lastSavedPt.y < bResultRect.y + bResultRect.height;
+		if(rectXbool && rectYbool){
+			isSavedBefore = true;
+			lastCenterpts[savedId].push_back(newCenterPts[resId]);
+			checkedList[savedId] = true;
+			break;
+		}
+	}
+
+	// the car is not saved before, add new car
+	if (!isSavedBefore) {
+		vector<Point> newCarPoints;
+		newCarPoints.push_back(newCenterPts[resId]);
+		lastCenterpts.push_back(newCarPoints);
+
+		vector<double> newCarIOUs;
+		iouList.push_back(newCarIOUs);
+		vector<double> newErrorDistance;
+		deerList.push_back(newErrorDistance);
+	}
+	if(savedId < iouList.size()){
+		iouList[savedId].push_back(iou);
+		deerList[savedId].push_back(deer);
+	}
+}
+
+void showPointsOnMap(DataBundle &data, BorderComponents &botComp, BorderComponents &topComp, CarInformation &ci, Mat *ppMapClone, Scalar color){
+
+	vector<vector<Point2f> > ptsBotSet = botComp.botLinePoint;
+	vector<vector<Point2f> > ptsTopSet = topComp.mainParts;
+
+	//====show map and point===
+	vector<Point2f> centerPtsInMap;
+	for (size_t linesId = 0; linesId < ptsBotSet.size(); ++linesId) {
+		vector<Point2f> botPerspect(ptsBotSet[linesId].size());
+		vector<Point2f> topPerspect(ptsTopSet[linesId].size());
+
+		if(botPerspect.size() == 0 || topPerspect.size() == 0)
+			continue;
+
+		perspectiveTransform(ptsBotSet[linesId], botPerspect, data.transformMat);
+		perspectiveTransform(ptsTopSet[linesId], topPerspect, data.transformMat);
+
+		// find center points
+		Point2f firstBtpt = botPerspect.back();
+		Point2f secondBtPt = botPerspect[1];
+		Point2f lastBtPt = botPerspect.front();
+		Point2f centerPt((firstBtpt.x + lastBtPt.x)/2,(firstBtpt.y + lastBtPt.y)/2);
+
+		// saved center point
+		if(ppMapClone){
+			circle(*ppMapClone, centerPt,3, Scalar(0,255,0), -1);
+		}
+
+		centerPtsInMap.push_back(centerPt);
+		// find symmetric points
+		size_t sizeOfbottomPts = botPerspect.size();
+		for (size_t hullPtId = 1; hullPtId < sizeOfbottomPts;++hullPtId) {
+			Point2f edgePt = botPerspect[hullPtId];
+			Point2f nextPt(2*centerPt.x - edgePt.x, 2*centerPt.y - edgePt.y);
+			botPerspect.push_back(nextPt);
+		}
+
+		//======= Height Estimating ========
+
+
+//		float d1 = (secondBtPt.x - firstBtpt.x)*(secondBtPt.x - firstBtpt.x) + (secondBtPt.y - firstBtpt.y)*(secondBtPt.y - firstBtpt.y);
+//		float d2 = (secondBtPt.x - lastBtPt.x)*(secondBtPt.x - lastBtPt.x) + (secondBtPt.y - lastBtPt.y)*(secondBtPt.y - lastBtPt.y);
 //
-//		size_t minyId = 0;
-//		int miny = pts[minyId].y;
-//		for (size_t i = 1; i < 4; ++i) {
-//			if (pts[i].y < miny) {
-//				minyId = i;
-//				miny = pts[i].y;
+//		// Find long edges
+//		Line l1 = Line(secondBtPt.x, secondBtPt.y, firstBtpt.x, firstBtpt.y);
+//		Line l2 = Line(secondBtPt.x, secondBtPt.y, lastBtPt.x, lastBtPt.y);
+//		Line baseLengthLine = d2 > d1? l2 : l1;
+//		Line baseWidthLine = d2 > d1? l1 : l2;
+//		float width, length;
+//		if(d2 > d1){
+//			width = sqrt(d1);
+//			length = sqrt(d2);
+//		}else{
+//			width = sqrt(d2);
+//			length = sqrt(d1);
+//		}
+//
+//
+////		float botDist = baseLine.distance(secondBtPt.x, secondBtPt.y, true);
+//		float maxDist = -1;
+//		int maxDistId = -1;
+//		// Calculate the distances
+//		for (size_t ptId = 0; ptId < topPerspect.size(); ++ptId) {
+//			float topDist = baseLengthLine.distance(topPerspect[ptId].x, topPerspect[ptId].y, true);
+//			float absTopDist = abs(topDist);
+//			if (maxDist == -1 || maxDist < absTopDist) {
+//				maxDist = absTopDist;
+//				maxDistId = ptId;
 //			}
 //		}
 //
-//		//		cvtColor(cannyImg,showMat,COLOR_GRAY2BGR);
-//		for (size_t i = 0; i < 4; ++i) {
-////			if (minyId != i && minyId != i + 1) {
-//				line(finalResultMat, pts[i], pts[(i + 1) % 4], Scalar(0, 0, 255), 1,CV_AA);
-////			}
-////			if (minyId != i)
-//				circle(finalResultMat, pts[i], 3, Scalar(0, 196, 255));
-//		}
-//	}
-//	imshow("detection",finalResultMat);
-*/
-//	imshow("cnts mat mask",cntsMergedMat);
-//	imshow("convexHull distance",drawing);
-//	imshow("Distance image", distanceMergedMat);
-//	return finalResultMat;
-	return ppMapClone;
+//		Point2f topPt = topPerspect[maxDistId];
+//		Point2f ptOnBaseLength = baseLengthLine.shadow(topPt.x, topPt.y);
+//		Point2f ptOnBaseWidth = baseWidthLine.shadow(topPt.x, topPt.y);
+//		float virtualHeightY = sqrt((topPt.x - ptOnBaseWidth.x)*(topPt.x - ptOnBaseWidth.x) + (topPt.y - ptOnBaseWidth.y)*(topPt.y - ptOnBaseWidth.y));
+//		circle(*ppMapClone, topPerspect[maxDistId],3, Scalar(255,0,238), -1);
+	// Stablize the result - no idea
+
+
+		// save the data
+		//		ci.carVirtualHeightsX.push_back(maxDist);
+		//		ci.carVirtualHeightsY.push_back(virtualHeightY);
+		//		ci.carWidths.push_back(width);
+		//		ci.carLengths.push_back(length);
+		//		ci.shadowX.push_back(ptOnBaseLength);
+		//		ci.shadowY.push_back(ptOnBaseWidth);
+
+		//==================================
+//			mappedCnts.push_back(outputPerspect);
+		// FOR TRACKING
+		ci.resultCenterListPts.push_back(centerPt);
+		Rect bRect = boundingRect(botPerspect);
+		ci.boundingResultList.push_back(bRect);
+
+
+		// show mapped points
+		if(ppMapClone){
+			for (size_t ppPtId = 0; ppPtId < botPerspect.size() - 1;++ppPtId) {
+				line(*ppMapClone, botPerspect[ppPtId], botPerspect[(ppPtId+1)%botPerspect.size()],color,2);
+				circle(*ppMapClone, botPerspect[ppPtId],3, Scalar(0,0,255), -1);
+			}
+//			for (size_t ppPtId = 0; ppPtId < topPerspect.size() - 1;++ppPtId) {
+//				line(*ppMapClone, topPerspect[ppPtId], topPerspect[(ppPtId+1)%topPerspect.size()],color,2);
+//			}
+		}
+
+	}
+}
+
+void findEndingPts(vector<vector<Point> > &hullCnts, EndingPoints &ep){
+	for (size_t cntId = 0; cntId < hullCnts.size(); ++cntId) {
+		int xleft, xright,ybottom, ytop;
+		ep.leftId.push_back(-1);
+		ep.rightId.push_back(-1);
+		ep.bottomId.push_back(-1);
+		ep.topId.push_back(-1);
+		for (size_t hullPtId = 0; hullPtId < hullCnts[cntId].size(); ++hullPtId) {
+			if(ep.leftId.back() == -1 || xleft > hullCnts[cntId][hullPtId].x){
+				ep.leftId[cntId] = hullPtId;
+				xleft = hullCnts[cntId][hullPtId].x;
+			}
+			if (ep.rightId.back() == -1|| xright < hullCnts[cntId][hullPtId].x) {
+				ep.rightId[cntId]= hullPtId;
+				xright = hullCnts[cntId][hullPtId].x;
+			}
+			if (ep.bottomId.back() == -1|| ybottom < hullCnts[cntId][hullPtId].y) {
+				ep.bottomId[cntId]= hullPtId;
+				ybottom = hullCnts[cntId][hullPtId].y;
+			}
+			if (ep.topId.back() == -1|| ytop > hullCnts[cntId][hullPtId].y) {
+				ep.topId[cntId]= hullPtId;
+				ytop = hullCnts[cntId][hullPtId].y;
+			}
+		}
+		if(ep.rightId.back() == -1)
+			ep.rightId.pop_back();
+		if(ep.leftId.back() == -1)
+			ep.leftId.pop_back();
+		if(ep.bottomId.back() == -1)
+			ep.bottomId.pop_back();
+		if(ep.topId.back() == -1)
+			ep.topId.pop_back();
+	}
+}
+
+void extractLines(vector<vector<Point> > &hullCnts, EndingPoints &ep, BorderComponents &bot, BorderComponents &top, int cutBL = 0, int cutBR = 0, int cutTL = 0, int cutTR = 0){
+	for (size_t cntId = 0; cntId < ep.leftId.size(); ++cntId) {
+//			int nearep.LeftId = -1;
+		Point ptLeft = hullCnts[cntId][ep.leftId[cntId]];
+		Point ptRight = hullCnts[cntId][ep.rightId[cntId]];
+		Point ptBot = hullCnts[cntId][ep.bottomId[cntId]];
+		Point ptTop = hullCnts[cntId][ep.topId[cntId]];
+
+		//======bottom point versus diagonal line=======
+		Line diagLine = Line(ptLeft.x,ptLeft.y,ptRight.x,ptRight.y);
+		int ptBtDirection = diagLine.distance(ptBot.x,ptBot.y, true);
+		//======bottom point versus left-bottom line=======
+		Line topBotLine = Line(ptTop.x, ptTop.y, ptBot.x, ptBot.y);
+		int leftRightDir = topBotLine.distance(ptRight.x,ptRight.y, true);
+		//======get points=======
+		vector<Point2f> botPts, botRightPts, botLeftPts;
+		vector<Point2f> topPts, topRightPts, topLeftPts;
+
+
+		if(cutBR == 0){
+			botPts.push_back(ptRight);
+			botRightPts.push_back(ptRight);
+		}
+
+		for (int hullPtId = 0; hullPtId < (int)(hullCnts[cntId].size()); ++hullPtId) {
+			Point ptTemp = hullCnts[cntId][hullPtId];
+			int ptTempBotDirection = diagLine.distance(ptTemp.x,ptTemp.y,true);
+			float tempDirection = ptBtDirection*ptTempBotDirection;
+			if(tempDirection > 0){	// same direction with bottom point
+				botPts.push_back(ptTemp);
+				int ptTempRightDirection = topBotLine.distance(ptTemp.x, ptTemp.y,true);
+				if (leftRightDir * ptTempRightDirection <= 0) {
+					botLeftPts.push_back(ptTemp);
+				} else {
+					botRightPts.push_back(ptTemp);
+				}
+			}
+			if(tempDirection < 0){
+				topPts.push_back(ptTemp);
+				int ptTempRightDirection = topBotLine.distance(ptTemp.x, ptTemp.y,true);
+				if (leftRightDir * ptTempRightDirection <= 0) {
+					topLeftPts.push_back(ptTemp);
+				} else {
+					topRightPts.push_back(ptTemp);
+				}
+			}
+		}
+
+
+		if(cutBL == 0){
+			botPts.push_back(ptLeft);
+			botLeftPts.push_back(ptLeft);
+		}
+
+		if(cutBL > 0 && botLeftPts.size() > 10){
+			int removedSize = (int)(botLeftPts.size() * cutBL/100.0);
+			for (int ptId = 0; ptId < removedSize; ++ptId) {
+				botLeftPts.pop_back();
+			}
+		}
+
+		if(cutBR > 0 && botRightPts.size() > 10){
+			int removedSize = (int)(botRightPts.size() * cutBR/100.0);
+			botRightPts.erase(botRightPts.begin(), botRightPts.begin() + removedSize);
+		}
+
+		if(cutTR > 0 && botRightPts.size() > 10){
+			int removedSize = (int)(topRightPts.size() * cutTR/100.0);
+			for (int ptId = 0; ptId < removedSize; ++ptId) {
+				topRightPts.pop_back();
+				topPts.pop_back();
+			}
+		}
+
+		if(cutTL > 0 && botLeftPts.size() > 10){
+			int removedSize = (int)(topLeftPts.size() * cutTL/100.0);
+			topLeftPts.erase(topLeftPts.begin(), topLeftPts.begin() + removedSize);
+			topPts.erase(topPts.begin(), topPts.begin() + removedSize);
+		}
+
+		bot.mainParts.push_back(botPts);
+		bot.leftPart.push_back(botLeftPts);
+		bot.rightPart.push_back(botRightPts);
+
+		top.mainParts.push_back(topPts);
+		top.leftPart.push_back(topLeftPts);
+		top.rightPart.push_back(topRightPts);
+	}
+}
+
+void analyzeData(vector<vector<Point> > &inputCnts, BorderComponents &bot, BorderComponents &top,Mat *cloneInput){
+
+	vector<vector<Point> > hullCnts(inputCnts.size());
+	vector<vector<Point2f> > bottomLines, leftLines, rightLines;
+
+	for (size_t cntId = 0; cntId < hullCnts.size(); ++cntId) {
+		convexHull(inputCnts[cntId], hullCnts[cntId]);
+	}
+
+	//==============first method bottom line extraction===============
+
+	//===== find ending left and ending right separating contour into 2 parts ===
+	EndingPoints ep;
+	findEndingPts(hullCnts, ep);
+
+	//==== extract only bottom line from hull contour =====
+	extractLines(hullCnts, ep, bot, top, 15, 15, 0 ,0);
+
+	vector<vector<Point2f> > topLayerPts, edgeLines;//, innerLines;
+	vector<vector<float> > shownDebugData;
+
+	fitLineToContour(bot.leftPart, bot.leftLines, cloneInput);
+	fitLineToContour(bot.rightPart, bot.rightLines, cloneInput);
+
+	generatePointsFromBorderLines(hullCnts, ep, bot, cloneInput);
+//	correctBottomLine(hullCnts, ep,bot, cloneInput);
+//	estimateHiddenLine(hullCnts, ep,bot, cloneInput);
+
+	//====show marked points======
+	if(cloneInput){
+		Scalar ptColor = Scalar(0,255,0); //Scalar(255,180,160);
+	//	Scalar ptLeft = Scalar(255,255,0);
+		Scalar ptBottom = Scalar(0,0,255);
+		Scalar ptRight = Scalar(255,0,255);
+		Scalar ptTop = Scalar(0,255,255);
+
+//		bot.drawLines(*cloneInput, bot.correctedMainPart, ptColor);
+
+		ep.drawPts(*cloneInput, hullCnts, ep.leftId, ptColor);
+		ep.drawPts(*cloneInput, hullCnts, ep.rightId, ptRight);
+		ep.drawPts(*cloneInput, hullCnts, ep.topId, ptBottom);
+		ep.drawPts(*cloneInput, hullCnts, ep.bottomId, ptTop);
+	}
+		imshow("hull pts Input clone", *cloneInput);
+
+
+}
+
+void carsSeparation(Mat cntsMat, vector<vector<Point> > *finalResultCnts, Mat *sepResult){
+
+	//================= startOfSep ============ Cars separation ============================
+	// distance transform to separate 2 cars
+	Mat distanceImage = Mat::zeros(cntsMat.size(), CV_8UC1);
+	distanceTransform(cntsMat, distanceImage, DIST_L2, 5);
+	normalize(distanceImage, distanceImage, 0,255, NORM_MINMAX );
+
+	// threshold distance transform to apply separation
+	double maxNormDistance;
+	minMaxLoc(distanceImage, 0, &maxNormDistance);
+	threshold(distanceImage, distanceImage, 0.55 * maxNormDistance,255,THRESH_TOZERO);
+
+	Mat distImg8UC1;
+	distanceImage.convertTo(distImg8UC1, CV_8UC1, 255,0);
+
+	// find markers for watershed by contours
+	vector<vector<Point> > movCntsDist;
+	findContours(distImg8UC1.clone(), movCntsDist, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+
+	vector<vector<Point> > hullDistance(movCntsDist.size());
+	vector<vector<int> > hullDistanceId(movCntsDist.size());
+	vector<vector<Vec4i> > defects(movCntsDist.size());
+	for (size_t i = 0; i < movCntsDist.size(); i++) {
+		convexHull(movCntsDist[i], hullDistance[i], false);
+		convexHull(movCntsDist[i], hullDistanceId[i], false);
+		if(hullDistanceId[i].size() > 3)
+			convexityDefects(movCntsDist[i],hullDistanceId[i], defects[i]);
+	}
+
+	Point separatingPts[2];
+	bool isSeparatingLineExist = false;
+	/// Draw contours + hull results
+	size_t len = movCntsDist.size();
+	for (size_t i = 0; i < len; i++) {
+
+		cv::Point2f posOld, posOlder;
+		cv::Point2f f1stDerivative, f2ndDerivative;
+
+		vector<int> defectIdList;
+
+		for (size_t j = 0; j < defects[i].size(); j++)
+	    {
+	    	Vec4i& v = defects[i][j];
+
+	    	// check if farId is between startId and endId or not
+	    	int startEndDist = (int)(len + (v[1] - v[0])) % len;
+	    	int startFarDist = (int)(len + (v[2] - v[0])) % len;
+
+	    	if(startEndDist < startFarDist)
+	    		// the farId is outside of start - end Id
+	    		continue;
+            int faridx = v[2]; Point ptFar(movCntsDist[i][faridx]);
+            //ignore the big size vehicle ( bus )
+			double directTest = pointPolygonTest(hullDistance[i], movCntsDist[i][faridx],false);
+
+            // depth is approximately equal distance with point polygonTest
+            // but may include the points that are outside of hull -- #stupid
+	        float depth = v[3] / 256.0 * directTest;
+	        if (depth > 4) //  filter defects by depth, e.g more than 10 - 4 is recommended
+	        {
+	        	defectIdList.push_back(j);
+	        }
+
+	    }
+		RotatedRect rect = minAreaRect(movCntsDist[i]);
+
+		if (defectIdList.size() > 2){
+			// if there are 3 points or more in defect point list
+			// find 2 nearest point to the center of this mov
+			double min1stDistVal, min2ndDistVal;
+			int min1stDistId = -1, min2ndDistId = -1;
+			for (size_t defectId = 0; defectId < defectIdList.size(); ++defectId) {
+				int faridx = defects[i][defectIdList[defectId]][2];
+				Point ptFar(movCntsDist[i][faridx]);
+				double d = sqrt(pow(ptFar.x - rect.center.x , 2) + pow(ptFar.y - rect.center.y , 2));
+				if(min1stDistId == -1 || min1stDistVal > d){
+					min1stDistVal = d;
+					min1stDistId = defectId;
+				}else if(min2ndDistId == -1 || min2ndDistVal > d){
+					min2ndDistVal = d;
+					min2ndDistId = defectId;
+				}
+			}
+			// found two nearest to center points
+			int faridx0 = defects[i][defectIdList[min1stDistId]][2];
+			separatingPts[0] = movCntsDist[i][faridx0];
+			int faridx1 = defects[i][defectIdList[min2ndDistId]][2];
+			separatingPts[1] = movCntsDist[i][faridx1];
+
+		}else if (defectIdList.size() == 2){
+
+			int faridx0 = defects[i][defectIdList[0]][2];
+			separatingPts[0] = movCntsDist[i][faridx0];
+			int faridx1 = defects[i][defectIdList[1]][2];
+			separatingPts[1] = movCntsDist[i][faridx1];
+		}
+		if(defectIdList.size() > 1){
+			isSeparatingLineExist = true;
+		}
+	}
+
+	// draw separating line and find the distance fragment again
+	if(isSeparatingLineExist){
+		movCntsDist.clear();
+//			imshow("before separating points applied",distImg8UC1);
+		line(distImg8UC1, separatingPts[0], separatingPts[1], Scalar(0),3,8);
+//			imshow("after separating points applied",distImg8UC1);
+		findContours(distImg8UC1, movCntsDist, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+//			waitKey(0);
+	}
+
+	// number of contour is number of separated cars
+	if(movCntsDist.size() > 1){
+		if(finalResultCnts)
+			(*finalResultCnts).pop_back();
+
+		Mat markers = Mat::zeros(cntsMat.rows, cntsMat.cols, CV_32SC1);
+
+		// draw area of markers
+		for (size_t cntIdDist = 0; cntIdDist < movCntsDist.size();cntIdDist++) {
+			drawContours(markers, movCntsDist, static_cast<int>(cntIdDist),Scalar::all(static_cast<int>(cntIdDist) + 1), -1);
+		}
+		circle(markers, Point(5, 5), 3, CV_RGB(255, 255, 255), -1);
+
+		Mat img8UC3;
+		cvtColor(cntsMat, img8UC3, CV_GRAY2BGR);
+		watershed(img8UC3, markers);
+
+		Mat mark = Mat::zeros(markers.size(), CV_8UC1);
+		markers.convertTo(mark, CV_8UC1);
+		bitwise_not(mark, mark);
+//			imshow("markers", mark);
+
+		//======================== Separation result analyzing ============================
+
+		for (size_t markerId = 1; markerId <= movCntsDist.size(); ++markerId) {
+			Mat markerExtractedMat = Mat::zeros(cntsMat.size(), CV_8UC1);
+
+			for (int i = 0; i < markers.rows; i++) {
+				for (int j = markers.cols - 1; j >= 0; j--) {
+					size_t index = markers.at<int>(i, j);
+					if (index == markerId){
+						markerExtractedMat.at<char>(i, j) = 255;
+					}
+					else
+						markerExtractedMat.at<char>(i, j) = 0;
+				}
+			}
+
+			vector<vector<Point> > separatedCnts;
+			findContours(markerExtractedMat.clone(), separatedCnts, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+
+			for (size_t sepCntId = 0; sepCntId < separatedCnts.size(); ++sepCntId) {
+				if(finalResultCnts)
+					(*finalResultCnts).push_back(separatedCnts[sepCntId]);
+				if(sepResult)
+					drawContours(*sepResult,separatedCnts,sepCntId, Scalar(255,196,0),2);
+			}
+		}
+	}
+#if NO_SUPPORT_PICTURES
+	if(sepResult)
+		imshow("sepResult", *sepResult);
+#endif
+//=========== endofSep ===========
+
 }
 
 Mat ImgProcessing::preProcessing(Mat &input, Mat *binMask){
-	Mat outRatio;
-	Mat outCnts;
+	Mat outRatio0p5;
+	Mat outRatio1;
 
 	// gray conversion
 	cvtColor(input, grayInput, COLOR_BGR2GRAY);
 
 
+
 	if(binMask)
 		bitwise_and(grayInput,*binMask,grayInput);
-/*
-//	imshow("gray input", grayInput);
 
-//	equalizeHist(grayInput, grayInput);
-//	imshow("equalized", grayInput);
-
-//	Mat edgesMat;
-//	Canny(grayInput, edgesMat, 30,250);
-//	imshow("edges", edgesMat);
-
-//	Mat grayInputFloat;
-//	grayInput.convertTo(grayInputFloat, CV_32FC1, 1.0/255);
-*/
 	if(accInput.data == NULL){
-		accInput = grayInput.clone()/2;
-/*
-//		double maxVal;
-//		minMaxLoc(accInput, 0, &maxVal);
-*/
-
-		recoverValue = mean(accInput).val[0];
-
-//		cout<<"recover value = "<< recoverValue<<endl;
-//		return Mat::zeros(1,1,CV_8UC1);
+		accInput = grayInput.clone();
+		accInput0p5 = accInput*0.5;
+		recoverValue = mean(grayInput).val[0];
 	}
 
+	Mat ratioImg0p5 = abs(grayInput / accInput0p5);
+	ratioImg0p5 = ratioImg0p5 * (int)recoverValue;
+	Mat ratioImg1 = abs(grayInput / accInput);
+	ratioImg1 = ratioImg1 * (int)recoverValue*3;
 
-	Mat ratioImg = abs(grayInput / accInput);
-//	double averageRatio = mean(ratioImg).val[0];
-//	cout<<"average ratio value = "<< averageRatio<<endl;
-	ratioImg = ratioImg * (int)recoverValue;
+#if NO_SUPPORT_PICTURES
+	imshow("ratio image0p5",ratioImg0p5);
+	imshow("ratio image1",ratioImg1);
+#endif
 
-//	imshow("ratio image",ratioImg);
-//	colorPixelPicker(ratioImg,"ratio");
+	pMOG2Ratio0p5->apply(ratioImg0p5, outRatio0p5, 0);//.0013);
+	pMOG2Ratio1->apply(ratioImg1, outRatio1, 0.0013);
 
-
-//	Mat thresRatio;
-//	threshold(ratioImg, thresRatio,70, 255, CV_THRESH_BINARY);
-
-//	imshow("bthres ratio",thresRatio);
-
-	// background extraction
-	/**
-	 * previous method: grayInput
-	 * new method: ratioImg
-	 */
-	pMOG2Ratio->apply(ratioImg, outRatio, 0);//.0013);
-	pMOG2grayInput->apply(grayInput, outCnts, 0.0013);
-
-//	imshow("edges sub", outCnts);
-//	morphologyEx(outCnts, outCnts, MORPH_OPEN, elmMedium);
-//	morphologyEx(outCnts, outCnts, MORPH_CLOSE, elm);
-//	imshow("edges morph", outCnts);
-
-	Mat inputCopy = input.clone();
 	Mat binBgSub = Mat::zeros(grayInput.rows,grayInput.cols,CV_8UC1);
-	Mat binRatio = binBgSub.clone();
+	Mat blankBin = binBgSub.clone();
 	//====================== Minor shadow result comparing area ==========================
 
-	morphologyEx(outCnts, outCnts, MORPH_CLOSE, elmMedium);
-	Mat showedInputbg = Mat::zeros(input.rows, input.cols, CV_8UC1);
-	bitwise_and(grayInput, outCnts, showedInputbg);
-
-	vector<vector<Point> > bgCnt;
- 	findContours(outCnts.clone(), bgCnt, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
- 	for (size_t cntId = 0; cntId < bgCnt.size(); ++cntId) {
- 		drawContours(inputCopy, bgCnt, cntId, Scalar(0,0,255), 2, 8, noArray());
- 		drawContours(binBgSub, bgCnt, cntId, Scalar(255), -1, 8, noArray());
-	}
+//	morphologyEx(outCnts, outCnts, MORPH_CLOSE, elmMedium);
+//	Mat showedInputbg = Mat::zeros(input.rows, input.cols, CV_8UC1);
+//	bitwise_and(grayInput, outCnts, showedInputbg);
+//
+//	vector<vector<Point> > bgCnt;
+// 	findContours(outCnts.clone(), bgCnt, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+// 	for (size_t cntId = 0; cntId < bgCnt.size(); ++cntId) {
+// 		drawContours(inputCopy, bgCnt, cntId, Scalar(0,0,255), 2, 8, noArray());
+// 		drawContours(binBgSub, bgCnt, cntId, Scalar(255), -1, 8, noArray());
+//	}
 //	imshow("bg to compare", showedInputbg);
 	//======================
 
-	morphologyEx(outRatio, outRatio, MORPH_CLOSE, elmMedium);
-	Mat showedInputRatio = Mat::zeros(input.rows, input.cols, CV_8UC1);
-	bitwise_and(grayInput, outRatio, showedInputRatio);
+	morphologyEx(outRatio0p5, outRatio0p5, MORPH_CLOSE, elmMedium);
+	morphologyEx(outRatio1, outRatio1, MORPH_CLOSE, elmMedium);
 
-	vector<vector<Point> > ratioCnt;
- 	findContours(outRatio.clone(), ratioCnt, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
-	vector<vector<Point> > hullCnt(ratioCnt.size());
- 	for (size_t cntId = 0; cntId < ratioCnt.size(); ++cntId) {
- 		drawContours(inputCopy, ratioCnt, cntId, Scalar(255,255,0), 2, 8, noArray());
- 		convexHull(ratioCnt[cntId], hullCnt[cntId], false);
- 		drawContours(binRatio, hullCnt, cntId, Scalar(255), -1, 8, noArray());
+	Mat draw0p5;
+	cvtColor(outRatio0p5,draw0p5,COLOR_GRAY2BGR);
+	carsSeparation(outRatio0p5, NULL, &draw0p5);
+
+	vector<vector<Point> > ratio0p5Cnt, ratio1Cnt;
+ 	findContours(outRatio0p5.clone(), ratio0p5Cnt, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+ 	findContours(outRatio1.clone(), ratio1Cnt, noArray(), CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+
+ 	Mat out0p5clone;
+	cvtColor(outRatio0p5,out0p5clone,COLOR_GRAY2BGR);
+
+	Mat blankBGR = Mat::zeros(grayInput.rows,grayInput.cols,CV_8UC3);
+	vector<vector<Point> > hullTemp(ratio0p5Cnt.size()), preHullObj;
+ 	for (size_t cntId0p5 = 0; cntId0p5 < ratio0p5Cnt.size(); ++cntId0p5) {
+ 		convexHull(ratio0p5Cnt[cntId0p5], hullTemp[cntId0p5], false);
+
+ 		vector<Point> tempObj;
+ 		for (size_t cntId1p = 0; cntId1p < ratio1Cnt.size(); ++cntId1p) {
+ 			for (size_t ptId1p = 0; ptId1p < ratio1Cnt[cntId1p].size(); ++ptId1p) {
+				int testResult = pointPolygonTest(hullTemp[cntId0p5],ratio1Cnt[cntId1p][ptId1p],false);
+				if(testResult >= 0){
+					tempObj.push_back(ratio1Cnt[cntId1p][ptId1p]);
+				}
+			}
+		}
+		if (tempObj.size() > 0) {
+			preHullObj.push_back(tempObj);
+		}
 	}
-//	imshow("mov to compare", showedInputRatio);
-//	imshow("input to compare", inputCopy);
+	if (preHullObj.size() > 0 && preHullObj[0].size()) {
+		vector<vector<Point> > hullObj(preHullObj.size());
 
-	//===================================================================================
-//	bitwise_and(binRatio, binBgSub, binRatio);
-//	imshow("Ratio And BgSub", binRatio);
+		for (size_t cntId = 0; cntId < preHullObj.size(); ++cntId) {
+			convexHull(preHullObj[cntId], hullObj[cntId], false);
+			drawContours(blankBGR, hullObj, cntId, Scalar(255,255,255), -1, 8, noArray());
+			drawContours(blankBin, hullObj, cntId, Scalar(255), -1, 8, noArray());
+		}
+#if NO_SUPPORT_PICTURES
+		imshow("test", blankBGR);
+#endif
+	}
+//	imshow("ratio bg mog", out0p5clone);
 
-//	vector<vector<Point> > movCnts;
-//	findContours(outCnts.clone(), movCnts, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
-
-//	for (size_t i = 0; i < movCnts.size(); ++i) {
-////		float area = contourArea(movCnts[i]);
-////		if(area > 10)
-//		drawContours(outCnts, movCnts, i, Scalar(255), -1, 8, noArray());
-//		imshow("edges morph", outCnts);
-////		waitKey(0);
-//	}
-
-
-//	cv::Mat bg = cv::Mat(input.size(), CV_8UC1);
-//	pMOG2->getBackgroundImage(bg);
-
-//	imshow("before open", output);
-	// close area with glass
-//	morphologyEx(outRatio, outRatio, MORPH_ERODE, elmOpen);
-
-
-
-//	morphologyEx(outCnts, outCnts, MORPH_OPEN, elmSmall);
-//	Mat erodeRatio;
-//	morphologyEx(outRatio, erodeRatio, MORPH_ERODE, elmOpen);
-//
-//	imshow("open dge ratio img", outCnts);
-	return outRatio; //- correct output
-// 	return outCnts;
+	return blankBin;
 }
+
 bool ImgProcessing::getCarGroundTruthFromDataFile(string fileName){
 	return getGroundTruthFromDataFile(fileName, gndTruthForCar);
 }
+
 bool ImgProcessing::getTruckGroundTruthFromDataFile( string fileName){
 	return getGroundTruthFromDataFile(fileName, gndTruthForTruck);
 }
+
 bool ImgProcessing::getGroundTruthFromDataFile(string fileName, vector<vector<vector<Point2f> > > &importedData) {
 //	Mat ppSetLayer;
 //	input.copyTo(ppSetLayer);
@@ -1002,7 +1027,8 @@ bool ImgProcessing::getGroundTruthFromDataFile(string fileName, vector<vector<ve
 		return true;
 	}
 }
-void ImgProcessing::showGroundTruthDataOnPPMap(Mat &img, vector<vector<Point2f> > &gndSet, vector<Point2f> &ptsList,vector<Rect> &boundingList, Scalar lineColor, Mat &transformMat){
+
+void ImgProcessing::showGroundTruthDataOnPPMap(Mat *img, vector<vector<Point2f> > &gndSet, vector<Point2f> &ptsList,vector<Rect> &boundingList, Scalar lineColor, Mat &transformMat){
 	for (size_t carId = 0; carId < gndSet.size(); ++carId) {
 		vector<Point2f> lines = gndSet[carId];
 		vector<Point2f> gndTruthpp(lines.size());
@@ -1017,20 +1043,24 @@ void ImgProcessing::showGroundTruthDataOnPPMap(Mat &img, vector<vector<Point2f> 
 		ptsList.push_back(rr.center);
 		boundingList.push_back(bTruthRect);
 
-
-		for (size_t ptId = 0; ptId < gndTruthpp.size(); ++ptId) {
-			line(img, gndTruthpp[ptId], gndTruthpp[(ptId+1)%gndTruthpp.size()],lineColor, 2);
-			circle(img, gndTruthpp[ptId], 2, Scalar(96, 128, 255),2);
+		if(img){
+			for (size_t ptId = 0; ptId < gndTruthpp.size(); ++ptId) {
+				line(*img, gndTruthpp[ptId], gndTruthpp[(ptId+1)%gndTruthpp.size()],lineColor, 2);
+				circle(*img, gndTruthpp[ptId], 2, Scalar(96, 128, 255),2);
+			}
 		}
 
 	}
 }
+
 void ImgProcessing::showCarGroundTruthData(Mat &img,size_t frameId){
 	showGroundTruthData(img, gndTruthForCar[frameId], Scalar(255, 0, 0));
 }
+
 void ImgProcessing::showTruckGroundTruthData(Mat &img, size_t frameId){
 	showGroundTruthData(img, gndTruthForTruck[frameId], Scalar(0, 255, 255));
 }
+
 void ImgProcessing::showGroundTruthData(Mat &img, vector<vector<Point2f> > &gndSet, Scalar lineColor){
 
 	for (size_t carId = 0; carId < gndSet.size(); ++carId) {
@@ -1054,6 +1084,7 @@ void select_points(int event, int x, int y, int flags, void* userdata)
 		p->y = y;
 	}
 }
+
 void getPointsWithMouse(Mat &input, Point2f pts[4]){
 	Mat ppSetLayer;
 	input.copyTo(ppSetLayer);
@@ -1110,6 +1141,7 @@ bool getPointsFromFile(Mat &input, Point2f *pts, string fileName){
 		return true;
 	}
 }
+
 void ImgProcessing::setupPPMap(Mat &input, Mat * binMask,Mat *transformMat, Mat *ppmap, string fileName){
 	Point2f pts[4],mapPt[4], extVal[4];
 	bool isNotError = (fileName.length() != 0);
@@ -1149,7 +1181,11 @@ void ImgProcessing::setupPPMap(Mat &input, Mat * binMask,Mat *transformMat, Mat 
 	if(ppmap && transformMat){
 		warpPerspective(input, (*ppmap), (*transformMat), Size(MAP_WIDTH, MAP_HEIGHT));
 	}
+#if !SHOW_MAP_SETTINGS
+	destroyWindow("Perspective Settings");
+#endif
 }
+
 bool ImgProcessing::checkPtOnROI(Point p){
 	for (size_t i = 0; i < 4; ++i) {
 		Point nextPt = roiPts[(i+1)%4];

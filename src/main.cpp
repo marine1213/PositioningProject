@@ -1,5 +1,9 @@
 #include "main.h"
 
+#define MAX_COUNT 250
+#define DELAY_T 20
+#define PI 3.1415
+
 int main(int argc, char** args){
 
 	// assertions
@@ -9,8 +13,8 @@ int main(int argc, char** args){
 	char c = 'a';
 	bool isFistFrame = true;
 	Mat img, binMask;
-	Mat transformMat, ppMap;
 	ImgProcessing proc;
+	DataBundle data;
 
 	// Read ground truth data
 	proc.getCarGroundTruthFromDataFile(CAR_GROUNDTRUTH_FILEPATH);
@@ -32,15 +36,17 @@ int main(int argc, char** args){
 		// if it is empty, error happened, end the program
 		if(img.empty())
 			break;
+#if SHOW_PREVIEW
 		// if no error happened, show the preview of input
 		imshow("Preview", img);
+#endif
 
 		// set up perspective parameter on the first frame
 		if(isFistFrame){
 			// The ROI_FILEPATH is the path to the list of 4 points
 			// If it is null, a screen will appear to ask the user input 4 point coordinates
 			// 4 points are the vertices of the working area (intersection in this case)
-			proc.setupPPMap(img, &binMask,&transformMat,&ppMap,ROI_FILEPATH);
+			proc.setupPPMap(img, &binMask,&(data.transformMat),&(data.ppMap),ROI_FILEPATH);
 			isFistFrame = false;
 			// get the starting second for timer
 			startTimer = clock();
@@ -48,13 +54,13 @@ int main(int argc, char** args){
 		// get current time
 		processTimer = clock();
 		// receive the output from image processing file
-		Mat output = proc.mainProcessing(img, frameId, &transformMat, &ppMap, &binMask);
+		Mat output = proc.mainProcessing(data, img, frameId, &binMask);
 		// calculate processing time in second
 		float processingTime = (float)(clock() - processTimer)* 1000 / CLOCKS_PER_SEC;
 		sumOfTime += processingTime;
 
-		if(frameId > 1){
-			//draw the ground truth to input
+		if(frameId > 1 && SHOW_ORIGINAL_GROUNDTRUTH){
+//			draw the ground truth to input
 			proc.showCarGroundTruthData(img,(frameId-2)/2);
 			proc.showTruckGroundTruthData(img,(frameId-2)/2);
 			imshow("gnd truth", img);

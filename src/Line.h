@@ -117,14 +117,26 @@ public:
 		p[1] = Dy/D;
 	}
 
+	Point2f shadow(float x, float y){
+		float* vtcp = getVTPT();
+		Line tLine = Line(x, y, x + vtcp[0], y + vtcp[1]);
+		float crossPoint[2];
+		cross(tLine, crossPoint);
+		return Point2f(crossPoint[0], crossPoint[1]);
+	}
+
 	float distance(float x, float y, bool direction = false){
 		float t = isOn(x,y)/sqrt(pow(vtptfl[0],2)+pow(vtptfl[1],2));
 		return direction?t:abs(t);
 	}
 
-	float angle(Line &l){
+	float angle(Line &l, bool isMinus = true){
 		float deltaAngle =  angleToOx - l.angleToOx;
-		return (deltaAngle > 90)?abs(deltaAngle - 180): deltaAngle;
+		if(isMinus)
+			return ((deltaAngle > 90))?abs(deltaAngle - 180): deltaAngle;
+		else
+			return ((deltaAngle < 0))?abs(deltaAngle + 180): deltaAngle;
+
 	}
 
 	float isOn(float x,float y){

@@ -12,6 +12,7 @@
 #include "extOpencvHeader.h"
 #include "my_tools.h"
 #include "opencv2/video/background_segm.hpp"
+#include "DataBundle.h"
 
 class ImgProcessing{
 
@@ -20,10 +21,10 @@ public:
 
 private:
 	Point roiPts[4];
-	Ptr< BackgroundSubtractorMOG2> pMOG2Ratio;
-	Ptr< BackgroundSubtractorMOG2> pMOG2grayInput;
+	Ptr< BackgroundSubtractorMOG2> pMOG2Ratio0p5;
+	Ptr< BackgroundSubtractorMOG2> pMOG2Ratio1;
 	Mat elm, elmMedium, elmSmall;
-	Mat grayInput,accInput;
+	Mat grayInput,accInput, accInput0p5;
 	double recoverValue;
 
 
@@ -32,6 +33,7 @@ private:
 	vector<Point> roiContour;
 	ofstream osfileForCar;
 	ofstream osfileForTruck;
+
 
 	//===== tracking =====
 	vector<vector<Point> > savedCarCenterPoints;
@@ -50,9 +52,9 @@ private:
 public:
 
 	ImgProcessing(){
-		pMOG2grayInput	= createBackgroundSubtractorMOG2(1000,16,false);
-		pMOG2Ratio 	= createBackgroundSubtractorMOG2(1000,16,false);
-		elm			= getStructuringElement(CV_SHAPE_ELLIPSE, Size(15,15));
+		pMOG2Ratio1	= createBackgroundSubtractorMOG2(1000,16,false);
+		pMOG2Ratio0p5 	= createBackgroundSubtractorMOG2(1000,16,false);
+		elm			= getStructuringElement(CV_SHAPE_ELLIPSE, Size(9,9));
 		elmMedium	= getStructuringElement(CV_SHAPE_ELLIPSE, Size(5,5));
 		elmSmall	= getStructuringElement(CV_SHAPE_ELLIPSE, Size(3,3));
 		recoverValue = -1;
@@ -77,7 +79,7 @@ public:
 	//       - draw and show the result
 	// added function: preventing interference of height to the estimation result
 	// next step: height estimation
-	Mat mainProcessing(Mat &input, int frameId, Mat *transformMat, Mat * ppmap, Mat *binMask = NULL);
+	Mat mainProcessing(DataBundle &data,Mat &input, int frameId, Mat *binMask = NULL);
 	// perform pre-process in this method
 	// including: minor shadow removal and background subtraction
 	Mat preProcessing(Mat &input,  Mat *binMask = NULL);
@@ -104,11 +106,14 @@ public:
 	bool checkPtOnROI(Point p);
 private:
 	// draw the ground truth after applied perspective map
-	void showGroundTruthDataOnPPMap(Mat &img, vector<vector<Point2f> > &gndSet, vector<Point2f> &ptsList,vector<Rect> &boundingList, Scalar lineColor, Mat &transformMat);
+	void showGroundTruthDataOnPPMap(Mat *img, vector<vector<Point2f> > &gndSet, vector<Point2f> &ptsList,vector<Rect> &boundingList, Scalar lineColor, Mat &transformMat);
 	// read the ground truth data file and save the data to importedData
 	bool getGroundTruthFromDataFile( string fileName, vector<vector<vector<Point2f> > > &importedData);
 	// draw the ground truth data based on the point information and color
 	void showGroundTruthData(Mat &img, vector<vector<Point2f> > &gndCarsSet, Scalar lineColor);
+	// compare the ground truth with detected center points and areas
+	void groundTruthComparing(DataBundle &data, CarInformation &ci, Mat *ppMapClone);
+
 };
 
 

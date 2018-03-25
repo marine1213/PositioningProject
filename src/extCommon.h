@@ -36,4 +36,12 @@ using namespace std;
 #define OS_FOR_CAR					DATASET_DATA"OuputStreamForCar.txt"
 #define OS_FOR_TRUCK				DATASET_DATA"OutputStreamForTruck.txt"
 #define OS_PROCESSING_TIME			DATASET_DATA"OutputStreamForCarProcessingTime.txt"
+
+#define	ACCURACY_EVALUATION			true
+#define SHOW_PREVIEW				fasle
+#define SHOW_MAP_SETTINGS			false
+#define SHOW_SUPPORT_PICTURES		false
+#define SHOW_GROUNDTRUTH_ON_MAP		true
+#define SHOW_ORIGINAL_GROUNDTRUTH	false
+
 #endif //_COMMON_H_
